@@ -4,6 +4,8 @@ import re
 import tkinter as tk
 from tkinter import Tk, filedialog, StringVar, OptionMenu, messagebox, Text, Scrollbar, Frame, ttk
 from datetime import datetime
+import pandas as pd
+from data_importer.utils.config_utils import ConfigUtils
 
 class UiUtils:
     @staticmethod
@@ -16,7 +18,8 @@ class UiUtils:
             filetypes=[
                 ("所有支持的文件", "*.xlsx *.xls *.csv"),
                 ("Excel文件", "*.xlsx *.xls"),
-                ("CSV文件", "*.csv")
+                ("CSV文件", "*.csv"),
+                ("所有文件", "*.*")
             ]
         )
         root.destroy()
@@ -86,56 +89,124 @@ class UiUtils:
 
     @staticmethod
     def get_mysql_connection_info():
-        """获取MySQL连接信息"""
+        """获取MySQL连接信息，优先从配置文件加载"""
+        # 首先尝试从配置文件加载
+        config = ConfigUtils.load_mysql_config()
+        
+        # 如果成功加载配置文件且包含必要信息，询问用户是否使用该配置
+        if config and config.get('host') and config.get('user') and config.get('database'):
+            # 创建确认对话框
+            confirm_dialog = tk.Tk()
+            confirm_dialog.title("使用已保存的连接配置")
+            confirm_dialog.geometry("350x200")
+            
+            info_text = f"找到已保存的MySQL连接配置:\n\n" \
+                       f"主机: {config['host']}\n" \
+                       f"端口: {config['port']}\n" \
+                       f"用户: {config['user']}\n" \
+                       f"数据库: {config['database']}\n\n" \
+                       f"是否使用此配置?"
+            
+            tk.Label(confirm_dialog, text=info_text, justify="left").pack(pady=10, padx=20)
+            
+            # 结果存储
+            result = {"use_saved": False}
+            
+            def use_saved():
+                result["use_saved"] = True
+                confirm_dialog.destroy()
+            
+            def create_new():
+                result["use_saved"] = False
+                confirm_dialog.destroy()
+            
+            button_frame = tk.Frame(confirm_dialog)
+            button_frame.pack(pady=10)
+            
+            tk.Button(button_frame, text="使用已保存配置", command=use_saved).pack(side="left", padx=10)
+            tk.Button(button_frame, text="创建新配置", command=create_new).pack(side="left", padx=10)
+            
+            confirm_dialog.mainloop()
+            
+            # 如果用户选择使用已保存配置，直接返回
+            if result["use_saved"]:
+                return config
+        
+        # 否则显示配置输入对话框
         dialog = tk.Tk()
         dialog.title("MySQL连接信息")
-        dialog.geometry("300x250")
+        dialog.geometry("350x300")
         
         # 创建标签和输入框
         tk.Label(dialog, text="主机:").grid(row=0, column=0, padx=10, pady=5, sticky="w")
         host_entry = tk.Entry(dialog, width=25)
-        host_entry.insert(0, "localhost")
+        host_entry.insert(0, config.get('host', 'localhost') if config else 'localhost')
         host_entry.grid(row=0, column=1, padx=10, pady=5)
         
         tk.Label(dialog, text="端口:").grid(row=1, column=0, padx=10, pady=5, sticky="w")
         port_entry = tk.Entry(dialog, width=25)
-        port_entry.insert(0, "3306")
+        port_entry.insert(0, str(config.get('port', 3306)) if config else '3306')
         port_entry.grid(row=1, column=1, padx=10, pady=5)
         
         tk.Label(dialog, text="用户名:").grid(row=2, column=0, padx=10, pady=5, sticky="w")
         user_entry = tk.Entry(dialog, width=25)
-        user_entry.insert(0, "root")
+        user_entry.insert(0, config.get('user', 'root') if config else 'root')
         user_entry.grid(row=2, column=1, padx=10, pady=5)
         
         tk.Label(dialog, text="密码:").grid(row=3, column=0, padx=10, pady=5, sticky="w")
         password_entry = tk.Entry(dialog, width=25, show="*")
+        if config and config.get('password'):
+            password_entry.insert(0, config['password'])
         password_entry.grid(row=3, column=1, padx=10, pady=5)
         
         tk.Label(dialog, text="数据库名:").grid(row=4, column=0, padx=10, pady=5, sticky="w")
         db_entry = tk.Entry(dialog, width=25)
+        if config and config.get('database'):
+            db_entry.insert(0, config['database'])
         db_entry.grid(row=4, column=1, padx=10, pady=5)
+        
+        # 保存配置选项
+        save_config_var = tk.BooleanVar()
+        save_config_var.set(True)  # 默认选中
+        save_config_check = tk.Checkbutton(dialog, text="保存配置供后续使用", variable=save_config_var)
+        save_config_check.grid(row=5, columnspan=2, padx=10, pady=5, sticky="w")
         
         # 创建一个变量存储结果
         result = {"success": False}
         
         def on_submit():
-            result["host"] = host_entry.get()
-            result["port"] = int(port_entry.get())
-            result["user"] = user_entry.get()
-            result["password"] = password_entry.get()
-            result["database"] = db_entry.get()
-            result["success"] = True
+            # 收集连接信息
+            connection_info = {
+                "host": host_entry.get(),
+                "port": int(port_entry.get()),
+                "user": user_entry.get(),
+                "password": password_entry.get(),
+                "database": db_entry.get(),
+                "success": True
+            }
+            
+            # 如果选择保存配置，则保存
+            if save_config_var.get():
+                ConfigUtils.save_mysql_config(connection_info)
+            
+            # 更新结果
+            for key, value in connection_info.items():
+                result[key] = value
+            
             dialog.destroy()
         
         def on_cancel():
             dialog.destroy()
         
         # 添加按钮
-        submit_button = tk.Button(dialog, text="连接", command=on_submit)
-        submit_button.grid(row=5, column=0, padx=10, pady=10)
+        btn_frame = tk.Frame(dialog)
+        btn_frame.grid(row=6, columnspan=2, pady=15)
         
-        cancel_button = tk.Button(dialog, text="取消", command=on_cancel)
-        cancel_button.grid(row=5, column=1, padx=10, pady=10)
+        submit_button = tk.Button(btn_frame, text="连接", command=on_submit, width=10)
+        submit_button.pack(side=tk.LEFT, padx=10)
+        
+        cancel_button = tk.Button(btn_frame, text="取消", command=on_cancel, width=10)
+        cancel_button.pack(side=tk.LEFT, padx=10)
         
         dialog.mainloop()
         
