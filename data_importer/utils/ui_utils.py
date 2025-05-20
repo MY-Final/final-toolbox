@@ -1,9 +1,9 @@
-"""
-用户界面工具类
-包含文件选择、设置对话框等UI相关功能
-"""
+"""用户界面工具类包含文件选择、设置对话框等UI相关功能"""
+import os
+import re
 import tkinter as tk
-from tkinter import Tk, filedialog, StringVar, OptionMenu, messagebox
+from tkinter import Tk, filedialog, StringVar, OptionMenu, messagebox, Text, Scrollbar, Frame, ttk
+from datetime import datetime
 
 class UiUtils:
     @staticmethod
@@ -140,3 +140,181 @@ class UiUtils:
         dialog.mainloop()
         
         return result if result["success"] else None 
+
+    @staticmethod
+    def confirm_column_mapping(preview_info, table_name, column_mappings):
+        """显示列映射预览并请求用户确认，支持修改数据类型"""
+        dialog = tk.Tk()
+        dialog.title(f"列映射预览 - {table_name}")
+        dialog.geometry("800x600")
+        
+        # 创建说明标签
+        tk.Label(dialog, text="请确认以下列映射和数据类型，可以直接修改数据类型：", font=("Helvetica", 10, "bold")).pack(pady=10)
+        
+        # 创建表格框架
+        table_frame = Frame(dialog)
+        table_frame.pack(fill="both", expand=True, padx=20, pady=5)
+        
+        # 创建滚动条
+        scrollbar_y = Scrollbar(table_frame)
+        scrollbar_y.pack(side="right", fill="y")
+        
+        scrollbar_x = Scrollbar(table_frame, orient="horizontal")
+        scrollbar_x.pack(side="bottom", fill="x")
+        
+        # 创建表格标题
+        headers_frame = Frame(table_frame)
+        headers_frame.pack(fill="x", side="top")
+        
+        tk.Label(headers_frame, text="原始列名", width=25, borderwidth=1, relief="solid", font=("Helvetica", 9, "bold")).pack(side="left")
+        tk.Label(headers_frame, text="数据库列名", width=25, borderwidth=1, relief="solid", font=("Helvetica", 9, "bold")).pack(side="left")
+        tk.Label(headers_frame, text="MySQL类型", width=25, borderwidth=1, relief="solid", font=("Helvetica", 9, "bold")).pack(side="left")
+        tk.Label(headers_frame, text="状态", width=10, borderwidth=1, relief="solid", font=("Helvetica", 9, "bold")).pack(side="left")
+        
+        # 创建表格内容
+        content_canvas = tk.Canvas(table_frame, yscrollcommand=scrollbar_y.set, xscrollcommand=scrollbar_x.set)
+        content_canvas.pack(side="left", fill="both", expand=True)
+        
+        scrollbar_y.config(command=content_canvas.yview)
+        scrollbar_x.config(command=content_canvas.xview)
+        
+        # 创建内部框架用于存放行
+        inner_frame = Frame(content_canvas)
+        content_canvas.create_window((0, 0), window=inner_frame, anchor="nw")
+        
+        # 用于存储类型输入框
+        type_entries = []
+        
+        # 添加每一行
+        for i, (orig, curr, type_str) in enumerate(column_mappings):
+            row_frame = Frame(inner_frame)
+            row_frame.pack(fill="x", pady=1)
+            
+            # 原始列名
+            orig_label = tk.Label(row_frame, text=str(orig), width=25, borderwidth=1, relief="solid", anchor="w", padx=5)
+            orig_label.pack(side="left")
+            
+            # 数据库列名
+            curr_label = tk.Label(row_frame, text=str(curr), width=25, borderwidth=1, relief="solid", anchor="w", padx=5)
+            curr_label.pack(side="left")
+            
+            # MySQL类型 - 使用Entry而不是Label，允许编辑
+            type_entry = tk.Entry(row_frame, width=25)
+            type_entry.insert(0, type_str)
+            type_entry.pack(side="left", padx=1)
+            type_entries.append((curr, type_entry))  # 保存列名和对应的类型输入框
+            
+            # 状态
+            if str(orig) != str(curr):
+                status_label = tk.Label(row_frame, text="已修改", width=10, fg="blue", borderwidth=1, relief="solid")
+            else:
+                status_label = tk.Label(row_frame, text="", width=10, borderwidth=1, relief="solid")
+            status_label.pack(side="left")
+        
+        # 更新scrollregion
+        inner_frame.update_idletasks()
+        content_canvas.config(scrollregion=content_canvas.bbox("all"))
+        
+        # 提供常用MySQL类型的参考
+        ref_frame = Frame(dialog)
+        ref_frame.pack(fill="x", padx=20, pady=10)
+        
+        tk.Label(ref_frame, text="常用MySQL类型参考:", font=("Helvetica", 9, "bold")).pack(anchor="w")
+        
+        ref_types = "整数: TINYINT, SMALLINT, INT, BIGINT (加UNSIGNED表示无符号)\n" + \
+                   "小数: DECIMAL(p,s), FLOAT, DOUBLE\n" + \
+                   "字符串: VARCHAR(n), TEXT, LONGTEXT\n" + \
+                   "日期时间: DATE, DATETIME, TIMESTAMP\n" + \
+                   "布尔值: TINYINT(1)"
+        
+        ref_label = tk.Label(ref_frame, text=ref_types, justify="left")
+        ref_label.pack(anchor="w")
+        
+        # 创建一个变量存储结果
+        result = {"confirmed": False, "types": {}}
+        
+        def on_confirm():
+            # 收集所有修改后的类型信息
+            for col_name, entry in type_entries:
+                result["types"][col_name] = entry.get().strip()
+            
+            result["confirmed"] = True
+            dialog.destroy()
+        
+        def on_cancel():
+            dialog.destroy()
+        
+        # 创建按钮框架
+        button_frame = Frame(dialog)
+        button_frame.pack(fill="x", pady=10)
+        
+        confirm_button = tk.Button(button_frame, text="确认并继续", command=on_confirm, width=15)
+        confirm_button.pack(side="left", padx=20)
+        
+        cancel_button = tk.Button(button_frame, text="取消", command=on_cancel, width=15)
+        cancel_button.pack(side="right", padx=20)
+        
+        dialog.mainloop()
+        
+        return result
+
+    @staticmethod
+    def show_import_report(report):
+        """显示导入报告"""
+        dialog = tk.Tk()
+        dialog.title("数据导入报告")
+        dialog.geometry("600x400")
+        
+        # 创建标题标签
+        tk.Label(dialog, text=f"表 {report['table_name']} 导入报告", font=("Helvetica", 12, "bold")).pack(pady=10)
+        
+        # 创建统计信息框架
+        stats_frame = Frame(dialog)
+        stats_frame.pack(fill="x", padx=20, pady=5)
+        
+        # 显示统计信息
+        stats_text = f"总行数: {report['total_rows']}\n"
+        stats_text += f"成功导入: {report['rows_inserted']} 行\n"
+        stats_text += f"失败: {report['error_rows']} 行\n"
+        stats_text += f"成功率: {report['success_rate']:.2f}%"
+        
+        tk.Label(stats_frame, text=stats_text, justify="left").pack(anchor="w")
+        
+        # 创建分隔线
+        separator = Frame(dialog, height=2, bd=1, relief="sunken")
+        separator.pack(fill="x", padx=20, pady=10)
+        
+        # 创建列映射标签
+        tk.Label(dialog, text="列映射详情:", font=("Helvetica", 10, "bold")).pack(anchor="w", padx=20)
+        
+        # 创建列映射框架
+        mapping_frame = Frame(dialog)
+        mapping_frame.pack(fill="both", expand=True, padx=20, pady=5)
+        
+        # 创建文本框和滚动条显示列映射
+        scrollbar = Scrollbar(mapping_frame)
+        scrollbar.pack(side="right", fill="y")
+        
+        text_area = Text(mapping_frame, wrap="word", yscrollcommand=scrollbar.set)
+        text_area.pack(side="left", fill="both", expand=True)
+        
+        scrollbar.config(command=text_area.yview)
+        
+        # 插入列映射信息
+        mapping_text = "原始列名 -> 数据库列名 (MySQL类型)\n"
+        mapping_text += "----------------------------------------\n"
+        
+        for orig, curr, type_str in report["column_mappings"]:
+            if str(orig) != str(curr):
+                mapping_text += f"{orig} -> {curr} ({type_str}) ← 已修改\n"
+            else:
+                mapping_text += f"{orig} -> {curr} ({type_str})\n"
+        
+        text_area.insert("1.0", mapping_text)
+        text_area.config(state="disabled")  # 设为只读
+        
+        # 创建关闭按钮
+        close_button = tk.Button(dialog, text="关闭", command=dialog.destroy, width=15)
+        close_button.pack(pady=10)
+        
+        dialog.mainloop() 

@@ -106,11 +106,14 @@ class DataUtils:
         # 检查数据类型
         print("\n列数据类型:")
         for col in df.columns:
-            print("  '" + str(col) + "': " + str(df[col].dtype))
+            col_type = df[col].dtype
+            print(f"  '{col}': {col_type}")
             
             # 检查是否有可能导致SQL问题的特殊字符
-            if df[col].dtype == 'object':
+            if pd.api.types.is_object_dtype(col_type):
                 sample = df[col].dropna().astype(str).head(100)
+                
+                # 检查特殊字符
                 has_backtick = False
                 has_quotes = False
                 has_backslash = False
@@ -131,6 +134,41 @@ class DataUtils:
                         print("      - 包含引号(' 或 \")，可能影响SQL字符串")
                     if has_backslash:
                         print("      - 包含反斜杠(\\)，可能影响转义序列")
+            
+            # 增强功能：检测混合数据类型
+            non_null = df[col].dropna()
+            if len(non_null) > 0:
+                sample_values = non_null.head(min(100, len(non_null)))
+                type_counts = {}
+                
+                for val in sample_values:
+                    val_type = type(val).__name__
+                    type_counts[val_type] = type_counts.get(val_type, 0) + 1
+                
+                if len(type_counts) > 1:
+                    print(f"    警告: 检测到混合数据类型: {type_counts}")
+                    # 提供例子
+                    examples = {}
+                    for val in sample_values[:5]:
+                        val_type = type(val).__name__
+                        if val_type not in examples:
+                            examples[val_type] = val
+                    print(f"    类型示例: {examples}")
+                
+                # 对于字符串类型，检查是否可能是数值型
+                if pd.api.types.is_object_dtype(col_type):
+                    # 尝试转换为数值
+                    numeric_conversion = pd.to_numeric(non_null, errors='coerce')
+                    conversion_success_rate = (numeric_conversion.notna().sum() / len(non_null)) * 100
+                    
+                    if conversion_success_rate > 0 and conversion_success_rate < 100:
+                        print(f"    警告: 该列有 {conversion_success_rate:.2f}% 的值可转换为数值型")
+                    elif conversion_success_rate == 100:
+                        # 检查是否有小数
+                        if (numeric_conversion % 1 == 0).all():
+                            print(f"    提示: 该列所有值都可以转换为整数")
+                        else:
+                            print(f"    提示: 该列所有值都可以转换为浮点数")
         
         # 检查缺失值
         null_counts = df.isna().sum()
@@ -139,7 +177,7 @@ class DataUtils:
             for col, count in null_counts.items():
                 if count > 0:
                     percent = round(count / len(df) * 100, 2)
-                    print("  '" + str(col) + "': " + str(count) + " 缺失值 (" + str(percent) + "%)")
+                    print(f"  '{col}': {count} 缺失值 ({percent}%)")
         
         # 检查数值范围，帮助确定适合的数据类型
         numeric_cols = df.select_dtypes(include=['number']).columns
@@ -147,11 +185,63 @@ class DataUtils:
             print("\n数值列范围:")
             for col in numeric_cols:
                 try:
-                    min_val = df[col].min()
-                    max_val = df[col].max()
-                    print("  '" + str(col) + "': 最小值=" + str(min_val) + ", 最大值=" + str(max_val))
-                except:
-                    print("  '" + str(col) + "': 无法计算范围")
+                    non_null_vals = df[col].dropna()
+                    if len(non_null_vals) > 0:
+                        min_val = non_null_vals.min()
+                        max_val = non_null_vals.max()
+                        # 判断是否为整数
+                        is_integer = pd.api.types.is_integer_dtype(df[col].dtype) or all(non_null_vals % 1 == 0)
+                        
+                        # 提供数据类型建议
+                        if is_integer:
+                            if min_val >= 0:
+                                if max_val <= 255:
+                                    dtype_suggestion = "TINYINT UNSIGNED"
+                                elif max_val <= 65535:
+                                    dtype_suggestion = "SMALLINT UNSIGNED"
+                                elif max_val <= 4294967295:
+                                    dtype_suggestion = "INT UNSIGNED"
+                                else:
+                                    dtype_suggestion = "BIGINT UNSIGNED"
+                            else:
+                                if min_val >= -128 and max_val <= 127:
+                                    dtype_suggestion = "TINYINT"
+                                elif min_val >= -32768 and max_val <= 32767:
+                                    dtype_suggestion = "SMALLINT"
+                                elif min_val >= -2147483648 and max_val <= 2147483647:
+                                    dtype_suggestion = "INT"
+                                else:
+                                    dtype_suggestion = "BIGINT"
+                            print(f"  '{col}': 最小值={min_val}, 最大值={max_val} (建议使用: {dtype_suggestion})")
+                        else:
+                            print(f"  '{col}': 最小值={min_val}, 最大值={max_val} (浮点数)")
+                except Exception as e:
+                    print(f"  '{col}': 无法计算范围 - {e}")
+        
+        # 检查字符串长度
+        string_cols = df.select_dtypes(include=['object']).columns
+        if len(string_cols) > 0:
+            print("\n字符串列长度:")
+            for col in string_cols:
+                try:
+                    non_null_vals = df[col].dropna().astype(str)
+                    if len(non_null_vals) > 0:
+                        str_lengths = non_null_vals.str.len()
+                        max_len = str_lengths.max()
+                        avg_len = str_lengths.mean()
+                        
+                        # 提供数据类型建议
+                        if max_len <= 255:
+                            suggested_length = min(int(max_len * 1.5), 255)
+                            dtype_suggestion = f"VARCHAR({suggested_length})"
+                        elif max_len <= 65535:
+                            dtype_suggestion = "TEXT"
+                        else:
+                            dtype_suggestion = "LONGTEXT"
+                        
+                        print(f"  '{col}': 最大长度={max_len}, 平均长度={avg_len:.1f} (建议使用: {dtype_suggestion})")
+                except Exception as e:
+                    print(f"  '{col}': 无法计算字符串长度 - {e}")
         
         print("=== 诊断结束 ===\n")
 
@@ -163,7 +253,7 @@ class DataUtils:
             return "VARCHAR(255)"
             
         # 特殊处理id列，使用BIGINT
-        if column_name.lower() == 'id':
+        if column_name.lower() == 'id' or column_name.lower().endswith('_id'):
             return "BIGINT"
         
         # 获取非空值
@@ -171,14 +261,74 @@ class DataUtils:
         if len(non_null) == 0:
             return "VARCHAR(255)"
         
+        # 检查数据类型的一致性 (新增功能)
+        # 抽样检查一些值，看它们的类型是否一致
+        sample_values = non_null.head(min(100, len(non_null)))
+        sample_types = set()
+        for val in sample_values:
+            if isinstance(val, (int, np.integer)):
+                sample_types.add("integer")
+            elif isinstance(val, (float, np.floating)):
+                sample_types.add("float")
+            elif isinstance(val, (str, np.character)):
+                sample_types.add("string")
+            elif isinstance(val, (pd.Timestamp, np.datetime64)):
+                sample_types.add("datetime")
+            else:
+                sample_types.add("other")
+        
+        # 如果检测到混合类型，发出警告
+        if len(sample_types) > 1:
+            print(f"警告: 列 '{column_name}' 包含混合数据类型: {sample_types}")
+            print(f"  将使用更通用的类型以兼容所有值")
+            # 如果混合类型包含字符串，优先使用VARCHAR
+            if "string" in sample_types:
+                # 计算最大字符串长度
+                try:
+                    str_vals = non_null.astype(str)
+                    max_length = str_vals.str.len().max()
+                    if max_length is np.nan or max_length <= 0:
+                        max_length = 255
+                    
+                    # 添加一些额外空间
+                    return f"VARCHAR({min(int(max_length * 1.5), 65535)})"
+                except:
+                    return "VARCHAR(255)"
+        
         # 检查数值类型
         if pd.api.types.is_integer_dtype(series.dtype):
             # 检查整数范围
             try:
-                if non_null.min() >= -2147483648 and non_null.max() <= 2147483647:
-                    return "INT"
-                else:
+                min_val = non_null.min()
+                max_val = non_null.max()
+                
+                # 检查是否有值超出正常范围
+                if pd.isna(min_val) or pd.isna(max_val):
                     return "BIGINT"
+                    
+                # 更细致的类型判断
+                if min_val >= 0:
+                    if max_val <= 255:
+                        return "TINYINT UNSIGNED"
+                    elif max_val <= 65535:
+                        return "SMALLINT UNSIGNED"
+                    elif max_val <= 16777215:
+                        return "MEDIUMINT UNSIGNED"
+                    elif max_val <= 4294967295:
+                        return "INT UNSIGNED"
+                    else:
+                        return "BIGINT UNSIGNED"
+                else:
+                    if min_val >= -128 and max_val <= 127:
+                        return "TINYINT"
+                    elif min_val >= -32768 and max_val <= 32767:
+                        return "SMALLINT"
+                    elif min_val >= -8388608 and max_val <= 8388607:
+                        return "MEDIUMINT"
+                    elif min_val >= -2147483648 and max_val <= 2147483647:
+                        return "INT"
+                    else:
+                        return "BIGINT"
             except:
                 return "BIGINT"
         elif pd.api.types.is_float_dtype(series.dtype):
@@ -186,43 +336,98 @@ class DataUtils:
             if not np.any(np.isnan(non_null)) and not np.any(np.isinf(non_null)):
                 # 计算最大精度和小数位
                 try:
-                    integers = non_null.apply(lambda x: len(str(int(x))))
-                    max_int_digits = integers.max() if len(integers) > 0 else 10
+                    # 检查是否所有值在一个合理的范围内
+                    min_val = non_null.min()
+                    max_val = non_null.max()
                     
-                    decimals = non_null.apply(lambda x: len(str(x).split('.')[-1]) if '.' in str(x) else 0)
-                    max_decimal_digits = decimals.max() if len(decimals) > 0 else 2
+                    # 检查是否有异常值，如果有，使用DOUBLE
+                    if pd.isna(min_val) or pd.isna(max_val) or np.isinf(min_val) or np.isinf(max_val):
+                        return "DOUBLE"
+                    
+                    # 分析各值的整数位数和小数位数
+                    str_vals = non_null.apply(lambda x: str(x))
+                    
+                    # 检查小数位数
+                    decimals = str_vals.apply(lambda x: len(x.split('.')[-1]) if '.' in x else 0)
+                    max_decimal_digits = decimals.max() if len(decimals) > 0 else 0
+                    
+                    # 检查整数位数
+                    integers = str_vals.apply(lambda x: len(x.split('.')[0]) if '.' in x else len(x))
+                    max_int_digits = integers.max() if len(integers) > 0 else 1
                     
                     # 限制精度和小数位
                     precision = min(max_int_digits + max_decimal_digits, 65)
                     scale = min(max_decimal_digits, 30)
                     
+                    # 防止精度为0
+                    if precision <= 0:
+                        precision = 1
+                    
+                    # 确保精度大于小数位数
+                    if scale >= precision:
+                        precision = scale + 1
+                    
+                    # 检查是否都是整数
+                    if max_decimal_digits == 0:
+                        # 如果都是整数，使用INT类型
+                        if max_int_digits <= 10:  # INT最大10位数
+                            return "INT"
+                        else:
+                            return "BIGINT"
+                    
                     if precision <= 65:  # MySQL DECIMAL最大精度
-                        return "DECIMAL(" + str(precision) + "," + str(scale) + ")"
-                except:
+                        return f"DECIMAL({precision},{scale})"
+                except Exception as e:
+                    print(f"DECIMAL类型推断出错，列 '{column_name}': {e}")
                     pass
             
             return "DOUBLE"
-        elif pd.api.types.is_datetime64_dtype(series.dtype):
-            return "DATETIME"
+        elif pd.api.types.is_datetime64_dtype(series.dtype) or pd.api.types.is_datetime64_ns_dtype(series.dtype):
+            # 检查是否需要包含时间部分
+            has_time = False
+            try:
+                for ts in non_null.head(min(100, len(non_null))):
+                    if hasattr(ts, 'hour') and (ts.hour != 0 or ts.minute != 0 or ts.second != 0):
+                        has_time = True
+                        break
+                
+                if has_time:
+                    return "DATETIME"
+                else:
+                    return "DATE"
+            except:
+                return "DATETIME"
+        elif pd.api.types.is_bool_dtype(series.dtype):
+            return "TINYINT(1)"
         else:
-            # 检查文本长度
+            # 处理字符串类型
             if series.dtype == 'object':
-                # 计算最大字符串长度
+                # 尝试转换为字符串计算长度
                 try:
-                    max_length = series.astype(str).str.len().max()
-                    if max_length is np.nan:
+                    # 取样本计算最大长度
+                    str_sample = non_null.astype(str).head(min(500, len(non_null)))
+                    lengths = str_sample.str.len()
+                    max_length = lengths.max()
+                    
+                    # 预留额外空间，但不超过合理范围
+                    if max_length is np.nan or max_length <= 0:
                         max_length = 255
                     
+                    # 确定适合的字符串类型
                     if max_length <= 255:
-                        # 添加一些额外空间
-                        return "VARCHAR(" + str(int(max_length + 50)) + ")"  
+                        # 添加一些额外空间，但不超过255
+                        return f"VARCHAR({min(int(max_length * 1.5), 255)})"
                     elif max_length <= 65535:
                         return "TEXT"
+                    elif max_length <= 16777215:
+                        return "MEDIUMTEXT"
                     else:
                         return "LONGTEXT"
-                except:
-                    return "TEXT"
-                    
+                except Exception as e:
+                    print(f"字符串类型推断出错，列 '{column_name}': {e}")
+                    return "VARCHAR(255)"
+            
+            # 默认类型
             return "VARCHAR(255)"
 
     @staticmethod
@@ -242,6 +447,18 @@ class DataUtils:
         # 处理时间类型
         if isinstance(val, (pd.Timestamp, pd.DatetimeTZDtype)):
             return val.to_pydatetime()
+        
+        # 处理字符串
+        if isinstance(val, str):
+            # 处理百分比格式，如"220.00%"、"50%"等
+            if '%' in val and re.match(r'^-?\d+(\.\d+)?%$', val.strip()):
+                try:
+                    # 去掉百分号，转换为小数（例如：220.00% -> 2.2）
+                    percent_value = float(val.strip().rstrip('%')) / 100
+                    return percent_value
+                except (ValueError, TypeError):
+                    # 如果转换失败，保持原始字符串
+                    pass
             
         # 处理字符串 - 将任何内容转为字符串
         # 这里不需要转义，因为我们使用参数化查询

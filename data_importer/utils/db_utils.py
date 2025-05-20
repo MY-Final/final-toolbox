@@ -7,10 +7,53 @@ import os
 import time
 import traceback
 import pandas as pd
+import logging
+import datetime
 from tkinter import messagebox
 from data_importer.utils.data_utils import DataUtils
+from data_importer.utils.ui_utils import UiUtils
+from tqdm import tqdm
+import numpy as np
 
 class DbUtils:
+    @staticmethod
+    def setup_logger(table_name):
+        """设置日志记录器"""
+        # 确保logs目录存在
+        log_dir = os.path.join(os.getcwd(), 'logs')
+        if not os.path.exists(log_dir):
+            os.makedirs(log_dir)
+            
+        # 创建日志文件名，包含表名和时间戳
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file = os.path.join(log_dir, f"import_{table_name}_{timestamp}.log")
+        
+        # 配置日志记录器
+        logger = logging.getLogger(f"import_{table_name}")
+        logger.setLevel(logging.INFO)
+        
+        # 创建文件处理器
+        file_handler = logging.FileHandler(log_file, encoding='utf-8')
+        file_handler.setLevel(logging.INFO)
+        
+        # 创建控制台处理器
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        
+        # 创建格式化器
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(formatter)
+        console_handler.setFormatter(formatter)
+        
+        # 添加处理器
+        logger.addHandler(file_handler)
+        logger.addHandler(console_handler)
+        
+        # 打印日志路径
+        print(f"正在记录日志到文件: {log_file}")
+        
+        return logger
+
     @staticmethod
     def escape_sql_identifier(identifier):
         """
@@ -133,6 +176,9 @@ class DbUtils:
             print("无法加载数据文件")
             return None
         
+        # 保存原始列名，用于后续映射展示
+        original_columns = df.columns.tolist()
+        
         # 调试数据结构
         DataUtils.debug_data_structure(df)
         
@@ -168,9 +214,16 @@ class DbUtils:
         table_name = clean_base_name + "_" + timestamp
         print("将创建表: " + table_name)
         
+        # 设置日志记录器
+        logger = DbUtils.setup_logger(clean_base_name)
+        logger.info(f"开始导入文件: {file_path}")
+        logger.info(f"目标表名: {table_name}")
+        logger.info(f"数据行数: {len(df)}, 列数: {len(df.columns)}")
+        
         conn = None
         try:
             # 连接到MySQL数据库
+            logger.info(f"连接到MySQL数据库: {mysql_conn_info['database']}@{mysql_conn_info['host']}:{mysql_conn_info['port']}")
             conn = pymysql.connect(
                 host=mysql_conn_info["host"],
                 port=mysql_conn_info["port"],
@@ -192,17 +245,83 @@ class DbUtils:
                 type_str = DataUtils.determine_mysql_type(col, df[col])
                 column_types.append((col, type_str))
                 
+            # 添加列名映射和数据类型预览
+            column_mappings = []
+            for i, (orig, curr) in enumerate(zip(original_columns, columns)):
+                if str(orig) != str(curr):
+                    column_mappings.append((orig, curr, column_types[i][1]))
+                else:
+                    column_mappings.append((orig, curr, column_types[i][1]))
+            
+            # 记录列类型到日志
+            logger.info("自动推断的列数据类型:")
+            for col, type_str in column_types:
+                logger.info(f"  '{col}': {type_str}")
+            
+            # 创建预览信息
+            preview_info = "列名映射和数据类型预览:\n\n"
+            preview_info += "原始列名 -> 数据库列名 (MySQL类型)\n"
+            preview_info += "----------------------------------------\n"
+            for orig, curr, type_str in column_mappings:
+                if str(orig) != str(curr):
+                    preview_info += f"{orig} -> {curr} ({type_str}) ← 已修改\n"
+                else:
+                    preview_info += f"{orig} -> {curr} ({type_str})\n"
+            
+            # 通过对话框显示预览信息并请求确认，允许修改数据类型
+            result = UiUtils.confirm_column_mapping(preview_info, table_name, column_mappings)
+            
+            if not result["confirmed"]:
+                logger.info("用户取消了导入操作")
+                print("用户取消了导入操作")
+                if conn:
+                    conn.close()
+                return None
+            
+            # 应用用户修改的数据类型
+            modified_types = result["types"]
+            
+            # 记录用户修改的类型到日志
+            if modified_types:
+                logger.info("用户修改的数据类型:")
+                for col, type_str in modified_types.items():
+                    logger.info(f"  '{col}': {type_str}")
+            
+            # 重建column_defs，应用用户修改的数据类型
+            column_defs = []
+            updated_column_types = []
+            
+            for col in columns:
+                # 使用用户修改的类型或保持原来的类型
+                if col in modified_types:
+                    type_str = modified_types[col]
+                    print(f"应用用户修改的类型: '{col}' -> {type_str}")
+                else:
+                    # 查找原始类型
+                    type_str = next((t for c, t in column_types if c == col), "VARCHAR(255)")
+                
+                updated_column_types.append((col, type_str))
+                
                 # 创建列定义字符串 - 使用转义函数
                 escaped_col = DbUtils.escape_sql_identifier(col)
                 column_defs.append(escaped_col + " " + type_str)
             
+            # 更新column_mappings用于报告
+            for i, (orig, curr, _) in enumerate(column_mappings):
+                # 查找更新后的类型
+                updated_type = next((t for c, t in updated_column_types if c == curr), "VARCHAR(255)")
+                column_mappings[i] = (orig, curr, updated_type)
+            
             # 创建表
+            logger.info("开始创建表...")
             if not DbUtils.execute_create_table(conn, table_name, column_defs):
+                logger.error("表创建失败")
                 if conn:
                     conn.close()
                 return None
             
             # 将数据写入表中
+            logger.info("开始导入数据...")
             print("正在导入数据...")
             
             # 确认列数
@@ -210,60 +329,183 @@ class DbUtils:
             print("列数: " + str(col_count))
             
             # 使用逐行插入方法，避免格式化问题
-            print("切换到逐行插入模式...")
+            print("切换到智能批处理导入模式...")
             rows_inserted = 0
             total_rows = len(df)
             error_rows = 0
             
-            # 分批提交，减轻数据库负载
-            batch_size = 100
+            # 错误详情记录
+            errors_detail = []
             
-            for i, (_, row) in enumerate(df.iterrows()):
-                try:
-                    # 提取行数据并处理NaN值
-                    values = []
-                    for col in columns:
-                        val = row[col]
-                        # 使用专门的函数处理值
-                        clean_val = DataUtils.clean_value_for_mysql(val)
-                        values.append(clean_val)
+            # 智能批处理参数
+            initial_batch_size = 100
+            current_batch_size = initial_batch_size
+            min_batch_size = 20
+            max_batch_size = 500
+            
+            # 性能追踪
+            speed_history = []
+            start_time = time.time()
+            batch_start_time = start_time
+            
+            # 使用tqdm创建进度条
+            with tqdm(total=total_rows, desc="数据导入进度", unit="行", ncols=100) as pbar:
+                i = 0
+                while i < total_rows:
+                    # 确定当前批次的结束索引
+                    end_idx = min(i + current_batch_size, total_rows)
+                    batch_size = end_idx - i
                     
-                    # 确保值的数量与列数相同
-                    if len(values) != len(columns):
-                        print("警告: 行 " + str(i) + " 数据不完整, 预期 " + str(len(columns)) + " 列, 实际 " + str(len(values)) + " 列, 已跳过")
-                        error_rows += 1
-                        continue
+                    # 处理当前批次
+                    batch_success = 0
+                    batch_errors = 0
                     
-                    # 执行插入
-                    if DbUtils.execute_insert(conn, table_name, columns, values):
-                        rows_inserted += 1
+                    # 记录批次开始时间
+                    batch_start_time = time.time()
+                    
+                    for idx in range(i, end_idx):
+                        _, row = next(iter_rows) if 'iter_rows' in locals() else df.iloc[idx:idx+1].iterrows().__next__()
+                        
+                        try:
+                            # 提取行数据并处理NaN值
+                            values = []
+                            for col in columns:
+                                val = row[col]
+                                # 使用专门的函数处理值
+                                clean_val = DataUtils.clean_value_for_mysql(val)
+                                values.append(clean_val)
+                            
+                            # 确保值的数量与列数相同
+                            if len(values) != len(columns):
+                                error_msg = f"行 {idx} 数据不完整, 预期 {len(columns)} 列, 实际 {len(values)} 列"
+                                logger.warning(error_msg)
+                                error_rows += 1
+                                batch_errors += 1
+                                errors_detail.append((idx, error_msg))
+                                continue
+                            
+                            # 执行插入
+                            if DbUtils.execute_insert(conn, table_name, columns, values):
+                                rows_inserted += 1
+                                batch_success += 1
+                            else:
+                                error_msg = f"行 {idx} 插入失败"
+                                logger.warning(error_msg)
+                                error_rows += 1
+                                batch_errors += 1
+                                errors_detail.append((idx, error_msg))
+                        
+                        except Exception as e:
+                            error_msg = f"行 {idx} 处理失败: {e}"
+                            logger.error(error_msg)
+                            logger.error(traceback.format_exc())
+                            error_rows += 1
+                            batch_errors += 1
+                            errors_detail.append((idx, str(e)))
+                            
+                            # 如果连续出现多次错误，可能需要中断操作
+                            if error_rows > 10 and error_rows / (idx + 1) > 0.5:  # 如果错误率超过50%
+                                abort_msg = "错误率过高，中断导入操作"
+                                logger.error(abort_msg)
+                                pbar.write(abort_msg)  # 使用pbar.write替代print
+                                break
+                    
+                    # 批次完成后，提交事务
+                    conn.commit()
+                    
+                    # 计算批次处理时间和速度
+                    batch_time = time.time() - batch_start_time
+                    batch_speed = batch_size / batch_time if batch_time > 0 else 0  # 行/秒
+                    
+                    # 记录历史速度用于平滑计算
+                    speed_history.append(batch_speed)
+                    if len(speed_history) > 10:  # 只保留最近10个批次的速度
+                        speed_history.pop(0)
+                    
+                    # 计算平均速度和预估剩余时间
+                    avg_speed = np.mean(speed_history) if speed_history else batch_speed
+                    rows_remaining = total_rows - (i + batch_size)
+                    eta_seconds = rows_remaining / avg_speed if avg_speed > 0 else 0
+                    
+                    # 格式化ETA
+                    if eta_seconds < 60:
+                        eta_str = f"{eta_seconds:.0f}秒"
+                    elif eta_seconds < 3600:
+                        eta_str = f"{eta_seconds/60:.1f}分钟"
                     else:
-                        error_rows += 1
+                        eta_str = f"{eta_seconds/3600:.1f}小时"
                     
-                    # 每batch_size行提交一次
-                    if (i + 1) % batch_size == 0:
-                        conn.commit()
-                        # 使用f-string而不是%格式化，避免%字符问题
-                        print(f"已导入 {i + 1}/{total_rows} 行数据 (成功: {rows_inserted}, 失败: {error_rows})")
+                    # 计算成功率
+                    success_rate = (rows_inserted / (i + batch_size)) * 100 if (i + batch_size) > 0 else 0
                     
-                except Exception as e:
-                    print("行 " + str(i) + " 处理失败: " + str(e))
-                    print(traceback.format_exc())
-                    error_rows += 1
-                    # 如果连续出现多次错误，可能需要中断操作
-                    if error_rows > 10 and error_rows / (i + 1) > 0.5:  # 如果错误率超过50%
-                        print("错误率过高，中断导入操作")
-                        break
+                    # 动态调整批处理大小
+                    if batch_time > 0:
+                        # 目标批处理时间为2秒
+                        target_time = 2.0
+                        ideal_batch_size = int(current_batch_size * (target_time / batch_time))
+                        
+                        # 限制批处理大小的变化幅度
+                        adjustment_factor = min(max(ideal_batch_size / current_batch_size, 0.8), 1.5)
+                        new_batch_size = int(current_batch_size * adjustment_factor)
+                        
+                        # 确保批处理大小在允许范围内
+                        current_batch_size = max(min_batch_size, min(new_batch_size, max_batch_size))
+                    
+                    # 更新进度条
+                    pbar.update(batch_size)
+                    
+                    # 更新进度条描述
+                    progress_desc = f"已导入: {rows_inserted}/{i+batch_size} | 速度: {avg_speed:.1f}行/秒 | 批次: {current_batch_size} | ETA: {eta_str}"
+                    pbar.set_description(progress_desc)
+                    
+                    # 记录到日志
+                    progress_msg = f"已导入 {i+batch_size}/{total_rows} 行 (成功: {rows_inserted}, 失败: {error_rows}) | 批次大小: {current_batch_size} | 速度: {avg_speed:.1f}行/秒"
+                    logger.info(progress_msg)
+                    
+                    # 移动到下一批
+                    i += batch_size
             
-            # 最后提交任何未提交的更改
-            conn.commit()
+            # 记录详细的错误信息
+            if errors_detail:
+                logger.warning("导入过程中遇到的错误详情:")
+                for row_idx, error_msg in errors_detail:
+                    logger.warning(f"  行 {row_idx}: {error_msg}")
             
-            print(f"数据导入完成: 成功导入 {rows_inserted}/{total_rows} 行数据, 失败: {error_rows}")
+            # 计算总运行时间
+            total_time = time.time() - start_time
+            avg_speed = rows_inserted / total_time if total_time > 0 else 0
+            
+            # 生成导入报告
+            report = DbUtils.generate_import_report(table_name, column_mappings, rows_inserted, total_rows, error_rows)
+            # 添加性能数据到报告
+            report["performance"] = {
+                "total_time_seconds": total_time,
+                "average_speed": avg_speed,
+                "final_batch_size": current_batch_size
+            }
+            UiUtils.show_import_report(report)
+            
+            # 格式化总时间
+            if total_time < 60:
+                time_str = f"{total_time:.1f}秒"
+            elif total_time < 3600:
+                time_str = f"{total_time/60:.1f}分钟"
+            else:
+                time_str = f"{total_time/3600:.1f}小时"
+            
+            summary_msg = f"数据导入完成: 成功导入 {rows_inserted}/{total_rows} 行数据, 失败: {error_rows}, 用时: {time_str}, 平均速度: {avg_speed:.1f}行/秒"
+            logger.info(summary_msg)
+            logger.info("导入操作结束")
+            print(summary_msg)  # 保留最终总结信息的打印
             
             return table_name
-            
+        
         except Exception as e:
-            print(f"数据库操作出错: {e}")
+            error_msg = f"数据库操作出错: {e}"
+            if 'logger' in locals():
+                logger.error(error_msg)
+                logger.error(traceback.format_exc())
+            print(error_msg)
             print(traceback.format_exc())
             messagebox.showerror("数据库错误", f"导入数据时出错:\n{e}")
             return None
@@ -271,3 +513,19 @@ class DbUtils:
             # 确保无论如何都关闭连接
             if conn:
                 conn.close()
+
+    @staticmethod
+    def generate_import_report(table_name, column_mappings, rows_inserted, total_rows, error_rows):
+        """生成导入报告，包含列映射和导入统计信息"""
+        success_rate = (rows_inserted / total_rows) * 100 if total_rows > 0 else 0
+        
+        report = {
+            "table_name": table_name,
+            "column_mappings": column_mappings,
+            "total_rows": total_rows,
+            "rows_inserted": rows_inserted,
+            "error_rows": error_rows,
+            "success_rate": success_rate
+        }
+        
+        return report

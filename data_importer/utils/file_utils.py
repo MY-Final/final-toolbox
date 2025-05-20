@@ -86,10 +86,10 @@ class FileUtils:
         for encoding in encodings:
             try:
                 print("尝试使用编码 " + str(encoding) + " 读取CSV")
-                # 使用on_bad_lines参数处理错误行
+                # 使用on_bad_lines参数处理错误行，encoding_errors代替errors
                 df = pd.read_csv(file_path, encoding=encoding, sep=sep, header=header, 
-                                on_bad_lines='warn', engine='python', quoting=0, 
-                                escapechar='\\', errors=errors)
+                               on_bad_lines='warn', engine='python', quoting=0, 
+                               escapechar='\\', encoding_errors=errors)
                 print("成功使用编码 " + str(encoding) + " 读取CSV")
                 return df, encoding
             except Exception as e:
