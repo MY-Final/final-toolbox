@@ -1,6 +1,6 @@
 """
-包的主入口点
-允许直接运行 python -m data_importer
+模块入口点
+允许以 python -m data_importer 方式运行
 """
 from data_importer.main import main
 
