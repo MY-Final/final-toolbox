@@ -441,25 +441,96 @@ class DataUtils:
             return None
             
         # 处理数值和布尔值
-        if isinstance(val, (int, float, bool)):
+        if isinstance(val, (int, float, bool, np.number)):
+            # 检查是否为无穷大或NaN
+            if isinstance(val, float) and (np.isnan(val) or np.isinf(val)):
+                return None
             return val
             
         # 处理时间类型
-        if isinstance(val, (pd.Timestamp, pd.DatetimeTZDtype)):
+        if isinstance(val, (pd.Timestamp, np.datetime64)):
             return val.to_pydatetime()
+        elif hasattr(val, 'to_pydatetime'):
+            try:
+                return val.to_pydatetime()
+            except:
+                pass
         
-        # 处理字符串
-        if isinstance(val, str):
-            # 处理百分比格式，如"220.00%"、"50%"等
-            if '%' in val and re.match(r'^-?\d+(\.\d+)?%$', val.strip()):
+        # 确保转换为字符串进行后续处理
+        if not isinstance(val, str):
+            val = str(val)
+        
+        # 处理空字符串
+        val = val.strip()
+        if val == '' or val.lower() in ('null', 'none', 'na', 'nan'):
+            return None
+            
+        # 处理特殊格式
+        try:
+            # 1. 处理百分比格式，如"220.00%"、"50%"等
+            if '%' in val and re.match(r'^-?\s*\d+(\.\d+)?\s*%$', val):
                 try:
-                    # 去掉百分号，转换为小数（例如：220.00% -> 2.2）
-                    percent_value = float(val.strip().rstrip('%')) / 100
+                    # 去掉百分号和空格，转换为小数（例如：220.00% -> 2.2）
+                    percent_value = float(val.strip().rstrip('%').strip()) / 100
                     return percent_value
                 except (ValueError, TypeError):
-                    # 如果转换失败，保持原始字符串
                     pass
+                    
+            # 2. 处理货币格式，如"$1,234.56"、"￥123"等
+            currency_match = re.match(r'^[^\d]*?(-?)[\s]*([0-9,]+(\.\d+)?)[\s]*[^\d]*$', val)
+            if currency_match:
+                try:
+                    sign = -1 if currency_match.group(1) else 1
+                    # 移除千位分隔符
+                    number_str = currency_match.group(2).replace(',', '')
+                    # 解析数值并应用符号
+                    return sign * float(number_str)
+                except (ValueError, TypeError):
+                    pass
+                    
+            # 3. 尝试解析常见日期格式
+            date_patterns = [
+                # 年月日 格式
+                (r'^(\d{4})[/\-.](\d{1,2})[/\-.](\d{1,2})$', lambda m: f"{m.group(1)}-{m.group(2).zfill(2)}-{m.group(3).zfill(2)}"),
+                # 日月年 格式
+                (r'^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})$', lambda m: f"{m.group(3)}-{m.group(2).zfill(2)}-{m.group(1).zfill(2)}"),
+                # 月日年 格式
+                (r'^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})$', lambda m: f"{m.group(3)}-{m.group(1).zfill(2)}-{m.group(2).zfill(2)}"),
+                # ISO 格式 (yyyy-mm-ddThh:mm:ss)
+                (r'^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?$', 
+                 lambda m: f"{m.group(1)}-{m.group(2)}-{m.group(3)} {m.group(4)}:{m.group(5)}:{m.group(6)}")
+            ]
             
-        # 处理字符串 - 将任何内容转为字符串
-        # 这里不需要转义，因为我们使用参数化查询
-        return str(val)
+            for pattern, formatter in date_patterns:
+                date_match = re.match(pattern, val)
+                if date_match:
+                    try:
+                        formatted_date = formatter(date_match)
+                        parsed_date = pd.to_datetime(formatted_date)
+                        return parsed_date.to_pydatetime()
+                    except:
+                        # 如果日期解析失败，继续尝试其他格式
+                        pass
+            
+            # 4. 检查是否是可转换为数值的字符串
+            if re.match(r'^-?\d+(\.\d+)?$', val):
+                try:
+                    # 判断是整数还是浮点数
+                    if '.' in val:
+                        return float(val)
+                    else:
+                        return int(val)
+                except (ValueError, TypeError):
+                    pass
+                
+        except Exception as e:
+            # 任何转换错误，保留原字符串
+            print(f"数据转换警告: {e} (值: {val})")
+            
+        # 处理超长字符串 - 截断过长的字符串以避免数据库错误
+        if len(val) > 65535:  # MySQL TEXT类型的最大长度
+            print(f"警告: 截断超长字符串，原长度: {len(val)}")
+            val = val[:65535]
+            
+        # 返回处理后的字符串
+        return val

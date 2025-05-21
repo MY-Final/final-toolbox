@@ -88,129 +88,121 @@ class UiUtils:
         return result if result["success"] else None
 
     @staticmethod
-    def get_mysql_connection_info():
-        """获取MySQL连接信息，优先从配置文件加载"""
-        # 首先尝试从配置文件加载
-        config = ConfigUtils.load_mysql_config()
+    def get_mysql_connection_info(saved_config=None):
+        """获取MySQL连接信息，支持预填充已保存的配置"""
+        # 创建对话框
+        dialog = tk.Toplevel()
+        dialog.title("MySQL连接配置")
+        dialog.geometry("400x300")
+        dialog.transient()  # 设置为临时窗口
+        dialog.grab_set()   # 模态对话框
+        dialog.lift()       # 窗口置顶
+        dialog.attributes('-topmost', True)
         
-        # 如果成功加载配置文件且包含必要信息，询问用户是否使用该配置
-        if config and config.get('host') and config.get('user') and config.get('database'):
-            # 创建确认对话框
-            confirm_dialog = tk.Tk()
-            confirm_dialog.title("使用已保存的连接配置")
-            confirm_dialog.geometry("350x200")
+        # 居中显示
+        dialog.update_idletasks()
+        width = dialog.winfo_width()
+        height = dialog.winfo_height()
+        x = (dialog.winfo_screenwidth() // 2) - (width // 2)
+        y = (dialog.winfo_screenheight() // 2) - (height // 2)
+        dialog.geometry(f'+{x}+{y}')
+        
+        # 创建表单
+        tk.Label(dialog, text="主机地址:").grid(row=0, column=0, padx=5, pady=5)
+        host_entry = tk.Entry(dialog, width=30)
+        host_entry.grid(row=0, column=1, padx=5, pady=5)
+        host_entry.insert(0, saved_config.get('host', 'localhost') if saved_config else 'localhost')
+        
+        tk.Label(dialog, text="端口:").grid(row=1, column=0, padx=5, pady=5)
+        port_entry = tk.Entry(dialog, width=30)
+        port_entry.grid(row=1, column=1, padx=5, pady=5)
+        port_entry.insert(0, saved_config.get('port', '3306') if saved_config else '3306')
+        
+        tk.Label(dialog, text="数据库名:").grid(row=2, column=0, padx=5, pady=5)
+        db_entry = tk.Entry(dialog, width=30)
+        db_entry.grid(row=2, column=1, padx=5, pady=5)
+        if saved_config and 'database' in saved_config:
+            db_entry.insert(0, saved_config['database'])
+        
+        tk.Label(dialog, text="用户名:").grid(row=3, column=0, padx=5, pady=5)
+        user_entry = tk.Entry(dialog, width=30)
+        user_entry.grid(row=3, column=1, padx=5, pady=5)
+        if saved_config and 'user' in saved_config:
+            user_entry.insert(0, saved_config['user'])
+        
+        tk.Label(dialog, text="密码:").grid(row=4, column=0, padx=5, pady=5)
+        pwd_entry = tk.Entry(dialog, width=30, show="*")
+        pwd_entry.grid(row=4, column=1, padx=5, pady=5)
+        
+        # 测试连接按钮
+        def test_connection():
+            from data_importer.utils.db_utils import DbUtils
             
-            info_text = f"找到已保存的MySQL连接配置:\n\n" \
-                       f"主机: {config['host']}\n" \
-                       f"端口: {config['port']}\n" \
-                       f"用户: {config['user']}\n" \
-                       f"数据库: {config['database']}\n\n" \
-                       f"是否使用此配置?"
-            
-            tk.Label(confirm_dialog, text=info_text, justify="left").pack(pady=10, padx=20)
-            
-            # 结果存储
-            result = {"use_saved": False}
-            
-            def use_saved():
-                result["use_saved"] = True
-                confirm_dialog.destroy()
-            
-            def create_new():
-                result["use_saved"] = False
-                confirm_dialog.destroy()
-            
-            button_frame = tk.Frame(confirm_dialog)
-            button_frame.pack(pady=10)
-            
-            tk.Button(button_frame, text="使用已保存配置", command=use_saved).pack(side="left", padx=10)
-            tk.Button(button_frame, text="创建新配置", command=create_new).pack(side="left", padx=10)
-            
-            confirm_dialog.mainloop()
-            
-            # 如果用户选择使用已保存配置，直接返回
-            if result["use_saved"]:
-                return config
-        
-        # 否则显示配置输入对话框
-        dialog = tk.Tk()
-        dialog.title("MySQL连接信息")
-        dialog.geometry("350x300")
-        
-        # 创建标签和输入框
-        tk.Label(dialog, text="主机:").grid(row=0, column=0, padx=10, pady=5, sticky="w")
-        host_entry = tk.Entry(dialog, width=25)
-        host_entry.insert(0, config.get('host', 'localhost') if config else 'localhost')
-        host_entry.grid(row=0, column=1, padx=10, pady=5)
-        
-        tk.Label(dialog, text="端口:").grid(row=1, column=0, padx=10, pady=5, sticky="w")
-        port_entry = tk.Entry(dialog, width=25)
-        port_entry.insert(0, str(config.get('port', 3306)) if config else '3306')
-        port_entry.grid(row=1, column=1, padx=10, pady=5)
-        
-        tk.Label(dialog, text="用户名:").grid(row=2, column=0, padx=10, pady=5, sticky="w")
-        user_entry = tk.Entry(dialog, width=25)
-        user_entry.insert(0, config.get('user', 'root') if config else 'root')
-        user_entry.grid(row=2, column=1, padx=10, pady=5)
-        
-        tk.Label(dialog, text="密码:").grid(row=3, column=0, padx=10, pady=5, sticky="w")
-        password_entry = tk.Entry(dialog, width=25, show="*")
-        if config and config.get('password'):
-            password_entry.insert(0, config['password'])
-        password_entry.grid(row=3, column=1, padx=10, pady=5)
-        
-        tk.Label(dialog, text="数据库名:").grid(row=4, column=0, padx=10, pady=5, sticky="w")
-        db_entry = tk.Entry(dialog, width=25)
-        if config and config.get('database'):
-            db_entry.insert(0, config['database'])
-        db_entry.grid(row=4, column=1, padx=10, pady=5)
-        
-        # 保存配置选项
-        save_config_var = tk.BooleanVar()
-        save_config_var.set(True)  # 默认选中
-        save_config_check = tk.Checkbutton(dialog, text="保存配置供后续使用", variable=save_config_var)
-        save_config_check.grid(row=5, columnspan=2, padx=10, pady=5, sticky="w")
-        
-        # 创建一个变量存储结果
-        result = {"success": False}
-        
-        def on_submit():
-            # 收集连接信息
-            connection_info = {
-                "host": host_entry.get(),
-                "port": int(port_entry.get()),
-                "user": user_entry.get(),
-                "password": password_entry.get(),
-                "database": db_entry.get(),
-                "success": True
+            port_str = port_entry.get().strip()
+            if not port_str.isdigit():
+                messagebox.showerror("错误", "端口号必须是数字！", parent=dialog)
+                return
+
+            info = {
+                'host': host_entry.get().strip(),
+                'port': int(port_str), # 转换为整数
+                'database': db_entry.get().strip(),
+                'user': user_entry.get().strip(),
+                'password': pwd_entry.get().strip()
             }
             
-            # 如果选择保存配置，则保存
-            if save_config_var.get():
-                ConfigUtils.save_mysql_config(connection_info)
+            success, message = DbUtils.test_mysql_connection(info)
+            if success:
+                messagebox.showinfo("成功", "数据库连接测试成功！", parent=dialog)
+            else:
+                messagebox.showerror("错误", f"数据库连接测试失败：{message}", parent=dialog)
+        
+        test_btn = tk.Button(dialog, text="测试连接", command=test_connection)
+        test_btn.grid(row=5, column=0, columnspan=2, pady=10)
+        
+        # 结果变量
+        result = {}
+        
+        def on_ok():
+            # 验证输入
+            port_str = port_entry.get().strip()
+            if not port_str.isdigit():
+                messagebox.showerror("错误", "端口号必须是数字！", parent=dialog)
+                return
+
+            # 验证其他必填字段
+            host_str = host_entry.get().strip()
+            db_str = db_entry.get().strip()
+            user_str = user_entry.get().strip()
             
-            # 更新结果
-            for key, value in connection_info.items():
-                result[key] = value
+            if not all([host_str, db_str, user_str]):
+                messagebox.showerror("错误", "主机地址、数据库名和用户名不能为空！", parent=dialog)
+                return
             
+            # 保存结果
+            result.update({
+                'host': host_str,
+                'port': int(port_str), # 确保转换为整数
+                'database': db_str,
+                'user': user_str,
+                'password': pwd_entry.get().strip() # 密码可以为空
+            })
             dialog.destroy()
         
         def on_cancel():
             dialog.destroy()
         
-        # 添加按钮
+        # 确定取消按钮
         btn_frame = tk.Frame(dialog)
-        btn_frame.grid(row=6, columnspan=2, pady=15)
+        btn_frame.grid(row=6, column=0, columnspan=2, pady=10)
         
-        submit_button = tk.Button(btn_frame, text="连接", command=on_submit, width=10)
-        submit_button.pack(side=tk.LEFT, padx=10)
+        tk.Button(btn_frame, text="确定", command=on_ok).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="取消", command=on_cancel).pack(side=tk.LEFT, padx=5)
         
-        cancel_button = tk.Button(btn_frame, text="取消", command=on_cancel, width=10)
-        cancel_button.pack(side=tk.LEFT, padx=10)
+        # 等待对话框关闭
+        dialog.wait_window()
         
-        dialog.mainloop()
-        
-        return result if result["success"] else None 
+        return result if result else None
 
     @staticmethod
     def confirm_column_mapping(preview_info, table_name, column_mappings):
@@ -218,6 +210,9 @@ class UiUtils:
         dialog = tk.Tk()
         dialog.title(f"列映射预览 - {table_name}")
         dialog.geometry("800x600")
+        dialog.lift()  # 确保窗口在最前面
+        dialog.attributes('-topmost', True)  # 设置为置顶窗口
+        dialog.update()  # 更新窗口显示
         
         # 创建说明标签
         tk.Label(dialog, text="请确认以下列映射和数据类型，可以直接修改数据类型：", font=("Helvetica", 10, "bold")).pack(pady=10)
@@ -335,6 +330,9 @@ class UiUtils:
         dialog = tk.Tk()
         dialog.title("数据导入报告")
         dialog.geometry("600x400")
+        dialog.lift()  # 确保窗口在最前面
+        dialog.attributes('-topmost', True)  # 设置为置顶窗口
+        dialog.update()  # 更新窗口显示
         
         # 创建标题标签
         tk.Label(dialog, text=f"表 {report['table_name']} 导入报告", font=("Helvetica", 12, "bold")).pack(pady=10)

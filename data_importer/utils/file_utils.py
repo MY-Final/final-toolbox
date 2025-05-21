@@ -111,18 +111,125 @@ class FileUtils:
         if ext.lower() in ['.xlsx', '.xls']:
             print("正在读取Excel文件: " + file_path)
             try:
-                # 对于Excel文件，尝试使用不同的引擎读取
-                try:
-                    df = pd.read_excel(file_path, engine='openpyxl')
-                    print("使用openpyxl引擎读取成功")
-                except:
+                # 检查文件大小，决定是否使用性能优化模式
+                file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+                print(f"文件大小: {file_size_mb:.2f} MB")
+                
+                # 对于大文件(>20MB)，使用优化的读取方式
+                use_optimized_loading = file_size_mb > 20
+                
+                # 输出用于调试的信息
+                print(f"使用优化加载模式: {use_optimized_loading}")
+                
+                # 对于大文件，尝试使用chunksize分批读取
+                if use_optimized_loading:
+                    print("文件较大，使用优化读取模式...")
                     try:
-                        df = pd.read_excel(file_path, engine='xlrd')
-                        print("使用xlrd引擎读取成功")
+                        # 先获取表头信息
+                        excel_file = pd.ExcelFile(file_path)
+                        sheet_names = excel_file.sheet_names
+                        print(f"检测到 {len(sheet_names)} 个工作表: {sheet_names}")
+                        
+                        # 默认使用第一个表
+                        sheet_name = sheet_names[0]
+                        print(f"使用第一个工作表: {sheet_name}")
+                        
+                        # 获取表头
+                        header_df = pd.read_excel(file_path, sheet_name=sheet_name, nrows=1)
+                        columns = header_df.columns.tolist()
+                        print(f"列名: {columns}")
+                        
+                        # pandas的read_excel对于某些版本不支持chunksize参数
+                        # 使用skiprows参数手动分批读取
+                        chunk_size = 5000
+                        chunks = []
+                        current_row = 1  # 跳过表头
+                        total_rows = None
+                        
+                        # 如果可能，尝试获取总行数
+                        try:
+                            if 'openpyxl' in pd.__version__:
+                                import openpyxl
+                                wb = openpyxl.load_workbook(file_path, read_only=True)
+                                sheet = wb[sheet_name]
+                                # 近似估计行数（可能包含空行）
+                                total_rows = sheet.max_row - 1  # 减去表头
+                                print(f"预估总行数: {total_rows}")
+                        except Exception as e:
+                            print(f"获取总行数失败: {e}")
+                        
+                        print("开始分批读取数据...")
+                        chunk_count = 0
+                        total_read_rows = 0
+                        
+                        while True:
+                            print(f"读取批次 {chunk_count+1}, 从第 {current_row+1} 行开始")
+                            try:
+                                # 读取一批数据
+                                chunk = pd.read_excel(
+                                    file_path,
+                                    sheet_name=sheet_name,
+                                    skiprows=current_row,
+                                    nrows=chunk_size
+                                )
+                                
+                                # 如果没有读到数据，说明已经到文件末尾
+                                if len(chunk) == 0:
+                                    print("已到达文件末尾")
+                                    break
+                                
+                                # 设置列名与表头一致
+                                if len(chunk.columns) == len(columns):
+                                    chunk.columns = columns
+                                
+                                print(f"批次 {chunk_count+1} 读取了 {len(chunk)} 行")
+                                total_read_rows += len(chunk)
+                                chunks.append(chunk)
+                                
+                                # 移动到下一批数据
+                                current_row += len(chunk)
+                                chunk_count += 1
+                                
+                                # 如果知道总行数且已经读取足够多，则退出循环
+                                if total_rows is not None and current_row >= total_rows:
+                                    print(f"已读取所有数据行，总计: {total_read_rows}")
+                                    break
+                            except Exception as e:
+                                print(f"批次 {chunk_count+1} 读取错误: {e}")
+                                # 如果读取到最后一批发生错误，可能是到了文件末尾
+                                if chunk_count > 0:
+                                    print("之前已成功读取部分数据，继续处理")
+                                    break
+                                else:
+                                    # 如果第一批就失败，则抛出异常
+                                    raise
+                        
+                        # 合并所有批次
+                        if chunks:
+                            print(f"合并 {len(chunks)} 个数据批次...")
+                            df = pd.concat(chunks, ignore_index=True)
+                            print(f"读取完成，总行数: {len(df)}")
+                        else:
+                            raise Exception("未能读取任何数据")
+                    except Exception as chunk_error:
+                        print(f"分批读取失败，尝试常规方式: {chunk_error}")
+                        # 回退到常规读取方式
+                        use_optimized_loading = False
+                
+                # 如果不使用优化模式或优化模式失败，使用常规方式读取
+                if not use_optimized_loading:
+                    # 对于Excel文件，尝试使用不同的引擎读取
+                    try:
+                        df = pd.read_excel(file_path, engine='openpyxl')
+                        print("使用openpyxl引擎读取成功")
                     except:
-                        # 最后尝试默认引擎
-                        df = pd.read_excel(file_path)
-                        print("使用默认引擎读取成功")
+                        try:
+                            df = pd.read_excel(file_path, engine='xlrd')
+                            print("使用xlrd引擎读取成功")
+                        except:
+                            # 最后尝试默认引擎
+                            df = pd.read_excel(file_path)
+                            print("使用默认引擎读取成功")
                 
                 # 检查是否成功读取数据
                 if df is None or len(df) == 0:
@@ -137,10 +244,13 @@ class FileUtils:
                     return None
                     
                 # 数据预处理
+                print("开始预处理数据...")
                 df = DataUtils.preprocess_dataframe(df)
                     
                 # 规范化列名
+                print("规范化列名...")
                 df = DataUtils.normalize_column_names(df)
+                print("Excel文件处理完成")
                 return df
             except Exception as e:
                 print("读取Excel文件出错: " + str(e))

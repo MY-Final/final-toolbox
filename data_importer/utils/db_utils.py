@@ -167,14 +167,173 @@ class DbUtils:
             return False
 
     @staticmethod
-    def create_database_from_file(file_path, mysql_conn_info, load_data_file_func):
-        """从数据文件创建MySQL数据库表并导入数据"""
+    def execute_batch_insert(conn, table_name, columns, batch_values):
+        """
+        执行批量插入操作，提高插入效率
+        """
+        cursor = conn.cursor()
+        try:
+            # 使用封装好的转义函数处理表名和列名
+            escaped_table = DbUtils.escape_sql_identifier(table_name)
+            escaped_columns = [DbUtils.escape_sql_identifier(col) for col in columns]
+            
+            # 构建批量插入SQL语句
+            sql_parts = []
+            sql_parts.append("INSERT INTO")
+            sql_parts.append(escaped_table)
+            sql_parts.append("(")
+            sql_parts.append(", ".join(escaped_columns))
+            sql_parts.append(") VALUES ")
+            
+            # 添加占位符
+            placeholders = []
+            for _ in range(len(columns)):
+                placeholders.append("%s")
+            placeholder_group = "(" + ", ".join(placeholders) + ")"
+            
+            # 为每组值创建占位符组，避免手动拼接
+            value_groups = []
+            flattened_values = []
+            
+            for row_values in batch_values:
+                value_groups.append(placeholder_group)
+                # 处理每行的值
+                for val in row_values:
+                    # 直接添加到扁平化值列表，不需要额外处理
+                    flattened_values.append(val)
+            
+            # 完成SQL语句
+            sql = sql_parts[0]
+            for part in sql_parts[1:]:
+                sql += " " + part
+            sql += " " + ", ".join(value_groups)
+            
+            # 执行批量插入
+            cursor.execute(sql, flattened_values)
+            return True
+        except Exception as e:
+            print("批量插入失败: " + str(e))
+            print("错误类型: " + str(type(e)))
+            print("SQL前缀: " + sql[:100] + "..." if 'sql' in locals() else "SQL未生成")
+            print("批次大小: " + str(len(batch_values)) + ", 列数量: " + str(len(columns)))
+            # 仅在开发调试时使用，生产环境注释此行
+            # print("完整SQL: " + sql if 'sql' in locals() else "SQL未生成")
+            print(traceback.format_exc())
+            return False
+
+    @staticmethod
+    def execute_transaction_with_retry(conn, func, max_retries=3, retry_delay=1.0):
+        """
+        带有自动重试功能的事务执行器
+        
+        参数:
+            conn: 数据库连接
+            func: 要在事务内执行的函数，接受cursor参数
+            max_retries: 最大重试次数
+            retry_delay: 重试延迟时间（秒）
+        
+        返回:
+            (成功与否, 结果或错误信息)
+        """
+        attempt = 0
+        last_error = None
+        
+        while attempt < max_retries:
+            try:
+                # 确保事务准备就绪
+                conn.ping(reconnect=True)
+                
+                # 创建游标
+                cursor = conn.cursor()
+                
+                # 开始事务
+                conn.begin()
+                
+                # 执行函数
+                result = func(cursor)
+                
+                # 提交事务
+                conn.commit()
+                
+                return (True, result)
+            
+            except pymysql.MySQLError as e:
+                # 数据库错误处理
+                last_error = e
+                error_code = e.args[0] if e.args else None
+                
+                # 记录错误
+                print(f"数据库错误 (尝试 {attempt+1}/{max_retries}): {e}")
+                
+                # 回滚事务
+                try:
+                    conn.rollback()
+                except:
+                    pass
+                
+                # 判断是否可以重试
+                if (
+                    # 死锁、锁等待超时或连接问题等可以重试的错误
+                    error_code in (1205, 1213, 2006, 2013, 4031) 
+                    # 不重试语法错误等无法自动恢复的问题
+                    and not error_code in (1064, 1146)
+                ):
+                    attempt += 1
+                    if attempt < max_retries:
+                        print(f"将在 {retry_delay} 秒后重试...")
+                        time.sleep(retry_delay)
+                        # 每次重试增加延迟时间
+                        retry_delay *= 1.5
+                    continue
+                else:
+                    # 不可重试的错误
+                    return (False, f"数据库错误: {e}")
+            
+            except Exception as e:
+                # 其他异常处理
+                last_error = e
+                print(f"非数据库错误: {e}")
+                print(traceback.format_exc())
+                
+                # 回滚事务
+                try:
+                    conn.rollback()
+                except:
+                    pass
+                
+                return (False, f"执行错误: {e}")
+        
+        # 所有重试失败
+        return (False, f"达到最大重试次数 ({max_retries})，最后错误: {last_error}")
+
+    @staticmethod
+    def create_database_from_file(file_path, mysql_conn_info, load_data_file_func, progress_callback=None):
+        """从数据文件创建MySQL数据库表并导入数据
+        
+        参数:
+            file_path: 数据文件路径
+            mysql_conn_info: MySQL连接信息字典
+            load_data_file_func: 加载数据文件的函数
+            progress_callback: 进度回调函数，接受消息和进度百分比参数
+        """
+        # 用于更新进度的辅助函数
+        def update_progress(message, progress=None):
+            if progress_callback:
+                progress_callback(message, progress)
+            print(message)
+        
         # 加载数据文件
+        update_progress("正在加载数据文件...", 10)
         df = load_data_file_func(file_path)
         
         if df is None:
+            update_progress("无法加载数据文件", None)
             print("无法加载数据文件")
             return None
+        
+        # 计算总行数用于进度报告
+        total_rows = len(df)
+        update_progress(f"成功加载数据文件，总计 {total_rows} 行数据", 15)
         
         # 保存原始列名，用于后续映射展示
         original_columns = df.columns.tolist()
@@ -184,6 +343,7 @@ class DbUtils:
         
         # 检测和修复数据完整性问题
         print("检测和修复数据完整性问题...")
+        update_progress("正在检查数据完整性...", 20)
         
         # 确保没有重复列名
         if len(df.columns) != len(set(df.columns)):
@@ -351,6 +511,16 @@ class DbUtils:
             # 使用tqdm创建进度条
             with tqdm(total=total_rows, desc="数据导入进度", unit="行", ncols=100) as pbar:
                 i = 0
+                # 初始化迭代器
+                iter_rows = df.iterrows()
+                
+                # 更新起始进度
+                update_progress("开始导入数据...", 35)
+                
+                # 上次进度更新时间，用于控制更新频率
+                last_progress_update = time.time()
+                progress_update_interval = 0.5  # 秒
+                
                 while i < total_rows:
                     # 确定当前批次的结束索引
                     end_idx = min(i + current_batch_size, total_rows)
@@ -363,10 +533,15 @@ class DbUtils:
                     # 记录批次开始时间
                     batch_start_time = time.time()
                     
-                    for idx in range(i, end_idx):
-                        _, row = next(iter_rows) if 'iter_rows' in locals() else df.iloc[idx:idx+1].iterrows().__next__()
-                        
+                    # 智能批处理导入
+                    batch_values = []
+                    batch_rows_info = []  # 存储批次中每行的索引信息
+                    
+                    for _ in range(batch_size):
                         try:
+                            # 从迭代器获取下一行
+                            idx, row = next(iter_rows)
+                            
                             # 提取行数据并处理NaN值
                             values = []
                             for col in columns:
@@ -384,34 +559,177 @@ class DbUtils:
                                 errors_detail.append((idx, error_msg))
                                 continue
                             
-                            # 执行插入
-                            if DbUtils.execute_insert(conn, table_name, columns, values):
-                                rows_inserted += 1
-                                batch_success += 1
-                            else:
-                                error_msg = f"行 {idx} 插入失败"
-                                logger.warning(error_msg)
-                                error_rows += 1
-                                batch_errors += 1
-                                errors_detail.append((idx, error_msg))
+                            # 将值添加到批处理列表
+                            batch_values.append(values)
+                            batch_rows_info.append(idx)
                         
                         except Exception as e:
-                            error_msg = f"行 {idx} 处理失败: {e}"
+                            error_msg = f"行 {idx if 'idx' in locals() else '?'} 处理失败: {e}"
                             logger.error(error_msg)
                             logger.error(traceback.format_exc())
                             error_rows += 1
                             batch_errors += 1
-                            errors_detail.append((idx, str(e)))
+                            errors_detail.append((idx if 'idx' in locals() else -1, str(e)))
                             
                             # 如果连续出现多次错误，可能需要中断操作
-                            if error_rows > 10 and error_rows / (idx + 1) > 0.5:  # 如果错误率超过50%
+                            if error_rows > 10 and error_rows / (i + _ + 1) > 0.5:  # 如果错误率超过50%
                                 abort_msg = "错误率过高，中断导入操作"
                                 logger.error(abort_msg)
-                                pbar.write(abort_msg)  # 使用pbar.write替代print
+                                update_progress(abort_msg, None)
                                 break
                     
-                    # 批次完成后，提交事务
-                    conn.commit()
+                    # 执行批量插入（如果有数据）
+                    if batch_values:
+                        # 使用事务管理器和重试机制执行批量插入
+                        def execute_batch(cursor):
+                            # 构建和执行批量插入语句
+                            escaped_table = DbUtils.escape_sql_identifier(table_name)
+                            escaped_columns = [DbUtils.escape_sql_identifier(col) for col in columns]
+                            
+                            # 构建批量插入SQL语句
+                            sql_parts = []
+                            sql_parts.append("INSERT INTO")
+                            sql_parts.append(escaped_table)
+                            sql_parts.append("(")
+                            sql_parts.append(", ".join(escaped_columns))
+                            sql_parts.append(") VALUES ")
+                            
+                            # 添加占位符
+                            placeholders = []
+                            for _ in range(len(columns)):
+                                placeholders.append("%s")
+                            placeholder_group = "(" + ", ".join(placeholders) + ")"
+                            
+                            # 为每组值创建占位符组
+                            value_groups = []
+                            flattened_values = []
+                            
+                            for row_values in batch_values:
+                                value_groups.append(placeholder_group)
+                                # 处理每行的值
+                                for val in row_values:
+                                    flattened_values.append(val)
+                            
+                            # 完成SQL语句
+                            sql = sql_parts[0]
+                            for part in sql_parts[1:]:
+                                sql += " " + part
+                            sql += " " + ", ".join(value_groups)
+                            
+                            # 执行批量插入
+                            cursor.execute(sql, flattened_values)
+                            return len(batch_values)  # 返回成功插入的行数
+                        
+                        # 执行带有重试机制的事务
+                        success, result = DbUtils.execute_transaction_with_retry(conn, execute_batch)
+                        
+                        if success:
+                            # 批量插入成功
+                            rows_inserted += result
+                            batch_success += result
+                            logger.info(f"批量插入成功: {result} 行")
+                        else:
+                            # 批量插入失败，尝试逐行插入作为回退策略
+                            error_msg = f"批量插入失败: {result}"
+                            logger.warning(error_msg)
+                            update_progress(f"批量插入失败，尝试逐行插入...", None)
+                            
+                            fallback_success = 0
+                            fallback_errors = 0
+                            
+                            # 逐行插入时不在同一个事务中，以保留成功的部分
+                            for i, (idx, values) in enumerate(zip(batch_rows_info, batch_values)):
+                                try:
+                                    # 构建单行插入函数
+                                    def execute_single_row(cursor):
+                                        # 构建INSERT语句
+                                        escaped_table = DbUtils.escape_sql_identifier(table_name)
+                                        escaped_columns = [DbUtils.escape_sql_identifier(col) for col in columns]
+                                        
+                                        # 构建SQL
+                                        sql_parts = []
+                                        sql_parts.append("INSERT INTO")
+                                        sql_parts.append(escaped_table)
+                                        sql_parts.append("(")
+                                        sql_parts.append(", ".join(escaped_columns))
+                                        sql_parts.append(") VALUES (")
+                                        
+                                        # 添加占位符
+                                        placeholders = []
+                                        for _ in range(len(columns)):
+                                            placeholders.append("%s")
+                                        sql_parts.append(", ".join(placeholders))
+                                        sql_parts.append(")")
+                                        
+                                        # 组合SQL语句
+                                        sql = " ".join(sql_parts)
+                                        
+                                        # 执行插入
+                                        cursor.execute(sql, values)
+                                        return True
+                                    
+                                    # 执行带有重试的单行事务
+                                    row_success, row_result = DbUtils.execute_transaction_with_retry(
+                                        conn, execute_single_row, max_retries=2)
+                                    
+                                    if row_success:
+                                        rows_inserted += 1
+                                        fallback_success += 1
+                                    else:
+                                        error_msg = f"行 {idx} 插入失败: {row_result}"
+                                        logger.warning(error_msg)
+                                        error_rows += 1
+                                        fallback_errors += 1
+                                        errors_detail.append((idx, error_msg))
+                                
+                                except Exception as e:
+                                    error_msg = f"行 {idx} 处理异常: {e}"
+                                    logger.error(error_msg)
+                                    logger.error(traceback.format_exc())
+                                    error_rows += 1
+                                    fallback_errors += 1
+                                    errors_detail.append((idx, str(e)))
+                                
+                                # 每插入10行更新一次进度，避免UI卡顿
+                                if i % 10 == 0:
+                                    progress_message = f"逐行插入中... 成功: {fallback_success}/{i+1}, 失败: {fallback_errors}"
+                                    update_progress(progress_message, None)
+                            
+                            logger.info(f"逐行插入回退：成功 {fallback_success}/{len(batch_values)} 行, 失败: {fallback_errors}")
+                            update_progress(f"逐行插入完成：成功 {fallback_success}/{len(batch_values)} 行, 失败: {fallback_errors}", None)
+                    
+                    # 批次完成后不再需要显式提交，已在事务中处理
+                    # 之前的conn.commit()可以删除
+                    
+                    # 更新UI进度
+                    current_time = time.time()
+                    if current_time - last_progress_update >= progress_update_interval:
+                        # 计算总体进度百分比(35-95%)
+                        processed_rows = i + batch_size
+                        overall_progress = 35 + (60 * processed_rows / total_rows)
+                        overall_progress = min(95, round(overall_progress, 1))
+                        
+                        # 计算速度和预估剩余时间
+                        elapsed = current_time - start_time
+                        speed = processed_rows / elapsed if elapsed > 0 else 0
+                        remaining_rows = total_rows - processed_rows
+                        eta_seconds = remaining_rows / speed if speed > 0 else 0
+                        
+                        # 格式化ETA
+                        if eta_seconds < 60:
+                            eta_str = f"{eta_seconds:.0f}秒"
+                        elif eta_seconds < 3600:
+                            eta_str = f"{eta_seconds/60:.1f}分钟"
+                        else:
+                            eta_str = f"{eta_seconds/3600:.1f}小时"
+                        
+                        # 更新UI
+                        success_rate = (rows_inserted / processed_rows * 100) if processed_rows > 0 else 0
+                        progress_message = f"已处理 {processed_rows}/{total_rows} 行 | 成功: {rows_inserted} ({success_rate:.1f}%) | 失败: {error_rows} | 速度: {speed:.1f}行/秒 | 剩余: {eta_str}"
+                        update_progress(progress_message, overall_progress)
+                        
+                        # 更新上次更新时间
+                        last_progress_update = current_time
                     
                     # 计算批次处理时间和速度
                     batch_time = time.time() - batch_start_time
@@ -422,40 +740,49 @@ class DbUtils:
                     if len(speed_history) > 10:  # 只保留最近10个批次的速度
                         speed_history.pop(0)
                     
-                    # 计算平均速度和预估剩余时间
+                    # 计算平均速度
                     avg_speed = np.mean(speed_history) if speed_history else batch_speed
-                    rows_remaining = total_rows - (i + batch_size)
-                    eta_seconds = rows_remaining / avg_speed if avg_speed > 0 else 0
                     
-                    # 格式化ETA
-                    if eta_seconds < 60:
-                        eta_str = f"{eta_seconds:.0f}秒"
-                    elif eta_seconds < 3600:
-                        eta_str = f"{eta_seconds/60:.1f}分钟"
-                    else:
-                        eta_str = f"{eta_seconds/3600:.1f}小时"
-                    
-                    # 计算成功率
-                    success_rate = (rows_inserted / (i + batch_size)) * 100 if (i + batch_size) > 0 else 0
-                    
-                    # 动态调整批处理大小
+                    # 更高级的自适应批处理大小调整逻辑
                     if batch_time > 0:
-                        # 目标批处理时间为2秒
-                        target_time = 2.0
-                        ideal_batch_size = int(current_batch_size * (target_time / batch_time))
+                        # 考虑多个因素来调整批处理大小
+                        # 1. 批处理时间（目标：1-3秒）
+                        time_factor = 2.0 / batch_time
                         
-                        # 限制批处理大小的变化幅度
-                        adjustment_factor = min(max(ideal_batch_size / current_batch_size, 0.8), 1.5)
+                        # 2. 错误率（错误越多，批次越小）
+                        error_rate = batch_errors / batch_size if batch_size > 0 else 0
+                        error_factor = 1.0 - (error_rate * 2)  # 错误率50%时减半批次大小
+                        
+                        # 3. 内存使用（理论上批次越大内存使用越高，但难以直接测量）
+                        # 这里我们假设如果批处理速度开始下降，可能是由于内存压力
+                        memory_factor = 1.0
+                        if len(speed_history) > 3:
+                            recent_avg = np.mean(speed_history[-3:])
+                            previous_avg = np.mean(speed_history[:-3]) if len(speed_history) > 6 else recent_avg
+                            if recent_avg < previous_avg * 0.85:  # 如果最近速度下降15%以上
+                                memory_factor = 0.9  # 稍微减小批次大小
+                        
+                        # 综合因素，计算调整系数
+                        adjustment_factor = time_factor * error_factor * memory_factor
+                        
+                        # 限制单次调整的幅度（0.7-1.5倍）
+                        adjustment_factor = min(max(adjustment_factor, 0.7), 1.5)
+                        
+                        # 应用调整
                         new_batch_size = int(current_batch_size * adjustment_factor)
                         
                         # 确保批处理大小在允许范围内
                         current_batch_size = max(min_batch_size, min(new_batch_size, max_batch_size))
+                        
+                        # 如果错误率高，进一步限制批处理大小
+                        if error_rate > 0.1:  # 错误率大于10%
+                            current_batch_size = min(current_batch_size, 50)
                     
                     # 更新进度条
                     pbar.update(batch_size)
                     
                     # 更新进度条描述
-                    progress_desc = f"已导入: {rows_inserted}/{i+batch_size} | 速度: {avg_speed:.1f}行/秒 | 批次: {current_batch_size} | ETA: {eta_str}"
+                    progress_desc = f"已导入: {rows_inserted}/{i+batch_size} | 速度: {avg_speed:.1f}行/秒 | 批次: {current_batch_size} | ETA: {eta_str if 'eta_str' in locals() else 'N/A'}"
                     pbar.set_description(progress_desc)
                     
                     # 记录到日志
@@ -529,3 +856,58 @@ class DbUtils:
         }
         
         return report
+
+    @staticmethod
+    def test_mysql_connection(mysql_conn_info):
+        """测试MySQL连接
+        返回: (成功与否, 错误信息)
+        """
+        print(f"测试数据库连接: {mysql_conn_info['host']}:{mysql_conn_info['port']} 数据库:{mysql_conn_info['database']}")
+        
+        try:
+            conn = pymysql.connect(
+                host=mysql_conn_info["host"],
+                port=mysql_conn_info["port"],
+                user=mysql_conn_info["user"],
+                password=mysql_conn_info["password"],
+                database=mysql_conn_info["database"],
+                charset='utf8mb4',
+                use_unicode=True,
+                connect_timeout=5  # 设置连接超时为5秒
+            )
+            
+            # 测试执行一个简单查询
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            result = cursor.fetchone()
+            
+            # 关闭连接
+            cursor.close()
+            conn.close()
+            
+            print("数据库连接测试成功")
+            return True, "连接成功"
+        except pymysql.Error as e:
+            error_msg = f"数据库连接失败: {e}"
+            error_code = getattr(e, 'errno', None)
+            print(f"{error_msg}, 错误代码: {error_code}")
+            
+            # 根据错误码提供更详细的提示
+            if error_code == 1045:
+                suggestion = "用户名或密码错误"
+            elif error_code == 1049:
+                suggestion = "数据库不存在，请先创建数据库"
+            elif error_code == 2003:
+                suggestion = "无法连接到数据库服务器，请检查主机地址和端口是否正确"
+            elif error_code == 2005:
+                suggestion = "无法解析主机名，请检查主机地址是否正确"
+            elif error_code == 1044:
+                suggestion = "没有访问数据库的权限"
+            else:
+                suggestion = "请检查数据库服务是否启动，以及连接信息是否正确"
+            
+            return False, f"{error_msg}\n建议: {suggestion}"
+        except Exception as e:
+            error_msg = f"连接测试出错: {str(e)}"
+            print(error_msg)
+            return False, error_msg
