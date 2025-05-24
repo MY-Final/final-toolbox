@@ -3,6 +3,7 @@
 处理文件的读取和写入
 """
 import os
+import chardet
 from datetime import datetime
 import pandas as pd
 from openpyxl import load_workbook
@@ -34,28 +35,134 @@ class FileUtils:
         return f"{base_name}_{date_prefix}_{idx:04d}.{ext}"
 
     @staticmethod
+    def detect_encoding(file_path):
+        """检测文件编码，更可靠的方法"""
+        # 读取更多内容来提高检测准确性
+        with open(file_path, 'rb') as f:
+            raw_data = f.read(100000)  # 读取更多字节以提高准确性
+            result = chardet.detect(raw_data)
+        
+        # 检查置信度和编码类型
+        if result['confidence'] > 0.7:
+            encoding = result['encoding']
+        else:
+            # 尝试常用编码列表
+            encoding = 'utf-8'  # 默认尝试UTF-8
+        
+        # 对于中文环境，特别处理一些常见编码
+        if encoding and encoding.lower() in ('gb2312', 'gbk', 'gb18030'):
+            # 使用更兼容的GB18030替代GB2312
+            return 'gb18030'
+        elif encoding and encoding.lower() == 'ascii':
+            # ASCII通常可以用UTF-8替代
+            return 'utf-8'
+        
+        return encoding or 'utf-8'  # 如果检测失败则默认UTF-8
+
+    @staticmethod
     def count_csv_rows(file_path):
         """计算CSV文件的总行数"""
-        with open(file_path, 'r', encoding='utf-8-sig', errors='ignore') as f:
-            total_rows = sum(1 for _ in f) - 1  # 减去表头
-        return total_rows
+        # 尝试多种编码
+        encodings_to_try = ['utf-8', 'gb18030', 'utf-8-sig', 'latin1']
+        
+        # 先检测文件编码
+        detected_encoding = FileUtils.detect_encoding(file_path)
+        if detected_encoding and detected_encoding not in encodings_to_try:
+            encodings_to_try.insert(0, detected_encoding)
+        
+        # 尝试所有编码
+        for encoding in encodings_to_try:
+            try:
+                with open(file_path, 'r', encoding=encoding, errors='replace') as f:
+                    total_rows = sum(1 for _ in f) - 1  # 减去表头
+                return total_rows
+            except Exception:
+                continue
+        
+        # 如果所有编码都失败，使用二进制模式计算行数
+        try:
+            with open(file_path, 'rb') as f:
+                total_rows = 0
+                for _ in f:
+                    total_rows += 1
+            return total_rows - 1  # 减去表头
+        except Exception as e:
+            raise ValueError(f"无法读取CSV文件: {str(e)}")
 
     @staticmethod
     def read_csv_chunks(file_path, batch_size):
-        """读取CSV文件，按块返回"""
-        return pd.read_csv(file_path, chunksize=batch_size, low_memory=False)
+        """读取CSV文件，按块返回，增强编码处理"""
+        # 尝试多种编码
+        encodings_to_try = ['utf-8', 'gb18030', 'utf-8-sig', 'latin1']
+        
+        # 先检测文件编码
+        detected_encoding = FileUtils.detect_encoding(file_path)
+        if detected_encoding and detected_encoding not in encodings_to_try:
+            encodings_to_try.insert(0, detected_encoding)
+        
+        # 尝试所有编码 - 使用C引擎
+        for encoding in encodings_to_try:
+            try:
+                return pd.read_csv(
+                    file_path, 
+                    chunksize=batch_size, 
+                    encoding=encoding, 
+                    low_memory=False, 
+                    on_bad_lines='skip'
+                )
+            except Exception:
+                continue
+        
+        # 如果C引擎失败，尝试Python引擎 (不使用low_memory参数)
+        for encoding in encodings_to_try:
+            try:
+                return pd.read_csv(
+                    file_path, 
+                    chunksize=batch_size, 
+                    encoding=encoding, 
+                    on_bad_lines='skip',
+                    engine='python'  # 使用Python引擎增强兼容性
+                )
+            except Exception:
+                continue
+        
+        # 最后尝试使用替换无法解析的字符
+        try:
+            return pd.read_csv(
+                file_path, 
+                chunksize=batch_size, 
+                encoding='utf-8', 
+                on_bad_lines='skip',
+                engine='python',
+                encoding_errors='replace'  # 替换无法解析的字符
+            )
+        except Exception as e:
+            raise ValueError(f"无法读取CSV文件: {str(e)}")
 
     @staticmethod
     def get_excel_data(file_path):
         """获取Excel工作表和头部信息"""
-        wb = load_workbook(file_path, read_only=True)
-        ws = wb.active
-        
-        total_rows = ws.max_row - 1
-        rows_gen = ws.iter_rows(values_only=True)
-        header = next(rows_gen)
-        
-        return ws, rows_gen, header, total_rows
+        try:
+            wb = load_workbook(file_path, read_only=True, data_only=True)
+            ws = wb.active
+            
+            # 检查是否有数据
+            if ws.max_row <= 1:  # 只有表头或空表
+                raise ValueError("Excel 文件无数据内容或只有表头")
+                
+            total_rows = ws.max_row - 1
+            rows_gen = ws.iter_rows(values_only=True)
+            header = next(rows_gen)
+            
+            # 验证表头是否有效
+            if not any(header):
+                raise ValueError("Excel 表头为空或无效")
+                
+            return ws, rows_gen, header, total_rows
+        except Exception as e:
+            if "Excel 文件无数据内容" not in str(e):
+                raise ValueError(f"读取Excel文件失败: {str(e)}")
+            raise
 
     @staticmethod
     def is_valid_file(file_path):
@@ -93,9 +200,12 @@ class FileUtils:
         elif ext in ['.xlsx', '.xls']:
             file_type = "Excel 文件"
             try:
-                wb = load_workbook(file_path, read_only=True)
+                wb = load_workbook(file_path, read_only=True, data_only=True)
                 ws = wb.active
-                rows = ws.max_row - 1  # 减去表头
+                if ws.max_row <= 1:
+                    rows = 0
+                else:
+                    rows = ws.max_row - 1  # 减去表头
             except Exception as e:
                 raise ValueError(f"读取Excel文件失败: {str(e)}")
         else:
@@ -124,6 +234,10 @@ def create_output_folder(folder_name="拆分结果", clear_old=False):
 
 def get_file_name(input_file, idx, ext):
     return FileUtils.get_file_name(input_file, idx, ext)
+
+
+def detect_encoding(file_path):
+    return FileUtils.detect_encoding(file_path)
 
 
 def count_csv_rows(file_path):
