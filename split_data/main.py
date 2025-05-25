@@ -9,34 +9,39 @@ from tkinter import filedialog, ttk, messagebox
 import threading
 from datetime import datetime
 
+# 添加当前目录到系统路径
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
+# 使用直接导入
 from split_data.split import split_file
 from split_data.utils.file_utils import get_file_info, is_valid_file
 from split_data.utils.ui_utils import center_window, create_tooltip
 from split_data.utils.log_utils import setup_logging, get_log_path
 
+# 尝试导入tkinterdnd2
+try:
+    from tkinterdnd2 import TkinterDnD, DND_FILES
+    TKDND_AVAILABLE = True
+except ImportError:
+    TKDND_AVAILABLE = False
+
+# 定义颜色
+PRIMARY_COLOR = "#1976D2"  # 蓝色
+SECONDARY_COLOR = "#4CAF50"  # 绿色
+BG_COLOR = "#F8F9FA"  # 背景色
 
 class SplitApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Excel/CSV文件拆分工具")
-        self.root.geometry("600x520")  # 增加窗口高度
+        self.root.geometry("650x620")
         self.root.resizable(True, True)
-        self.root.minsize(600, 520)  # 增加最小高度
+        self.root.minsize(650, 620)
+        self.root.configure(bg=BG_COLOR)
         
-        # 设置应用图标
-        try:
-            if getattr(sys, 'frozen', False):
-                # 打包后的路径
-                app_path = sys._MEIPASS
-            else:
-                # 开发环境路径
-                app_path = os.path.dirname(os.path.abspath(__file__))
-                
-            # 如果有图标文件，可以设置
-            # self.root.iconbitmap(os.path.join(app_path, "icon.ico"))
-        except Exception:
-            pass
-            
         center_window(self.root)
         
         # 初始化日志
@@ -49,105 +54,267 @@ class SplitApp:
         self.splitting = False
         self.split_thread = None
         
+        # 设置文件拖放支持
+        if TKDND_AVAILABLE:
+            self.setup_drag_drop()
+    
+    def setup_drag_drop(self):
+        """设置文件拖放支持"""
+        # 整个窗口支持拖放
+        self.root.drop_target_register(DND_FILES)
+        self.root.dnd_bind('<<Drop>>', self.handle_drop)
+        
+    def handle_drop(self, event):
+        """处理文件拖放事件"""
+        # 获取拖放的文件路径
+        file_path = event.data
+        
+        # 处理Windows下的路径格式 {文件路径}
+        if file_path.startswith('{') and file_path.endswith('}'):
+            file_path = file_path[1:-1]
+        
+        # 处理多个文件（Windows下路径中可能包含空格）
+        if ' ' in file_path and (not os.path.exists(file_path) or not os.path.isfile(file_path)):
+            # 尝试按空格分割并检查第一个路径
+            paths = file_path.split(' ')
+            for p in paths:
+                if os.path.isfile(p) and is_valid_file(p):
+                    file_path = p
+                    break
+        
+        # 检查文件是否有效
+        if os.path.isfile(file_path) and is_valid_file(file_path):
+            self.file_path.set(file_path)
+            self.update_file_info(file_path)
+        else:
+            messagebox.showerror("错误", f"拖放的文件无效或不支持的格式:\n{file_path}")
+        
     def create_widgets(self):
         """创建GUI组件"""
+        # 顶部标题
+        title_label = tk.Label(
+            self.root,
+            text="Excel/CSV 文件拆分工具",
+            font=("Arial", 18, "bold"),
+            fg=PRIMARY_COLOR,
+            bg=BG_COLOR,
+            pady=10
+        )
+        title_label.pack(pady=10)
+        
         # 主框架
-        main_frame = ttk.Frame(self.root, padding="20 20 20 20")
+        main_frame = tk.Frame(self.root, bg=BG_COLOR, padx=20, pady=10)
         main_frame.pack(fill=tk.BOTH, expand=True)
         
         # 文件选择区域
-        file_frame = ttk.LabelFrame(main_frame, text="选择要拆分的文件", padding="10 10 10 10")
+        file_frame = tk.LabelFrame(
+            main_frame,
+            text="选择文件",
+            bg="white",
+            font=("Arial", 10),
+            padx=10,
+            pady=10
+        )
         file_frame.pack(fill=tk.X, pady=10)
         
+        # 提示文本
+        hint_label = tk.Label(
+            file_frame,
+            text="拖放文件到此处，或选择文件路径:",
+            bg="white",
+            anchor=tk.W
+        )
+        hint_label.pack(fill=tk.X, pady=(0, 5))
+        
         # 文件路径输入和浏览按钮
+        path_frame = tk.Frame(file_frame, bg="white")
+        path_frame.pack(fill=tk.X)
+        
         self.file_path = tk.StringVar()
-        file_entry = ttk.Entry(file_frame, textvariable=self.file_path)
+        file_entry = tk.Entry(
+            path_frame,
+            textvariable=self.file_path,
+            font=("Arial", 10),
+            width=50
+        )
         file_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
         
-        browse_btn = ttk.Button(file_frame, text="浏览...", command=self.browse_file)
+        browse_btn = tk.Button(
+            path_frame,
+            text="浏览...",
+            command=self.browse_file,
+            bg=PRIMARY_COLOR,
+            fg="white",
+            padx=10,
+            relief=tk.FLAT
+        )
         browse_btn.pack(side=tk.RIGHT)
         
         # 文件信息显示区
-        self.info_frame = ttk.LabelFrame(main_frame, text="文件信息", padding="10 10 10 10")
-        self.info_frame.pack(fill=tk.X, pady=10)
+        info_frame = tk.LabelFrame(
+            main_frame,
+            text="文件信息",
+            bg="white",
+            font=("Arial", 10),
+            padx=10,
+            pady=10
+        )
+        info_frame.pack(fill=tk.X, pady=10)
         
-        self.file_info_text = tk.Text(self.info_frame, height=5, wrap=tk.WORD)
+        self.file_info_text = tk.Text(
+            info_frame,
+            height=5,
+            wrap=tk.WORD,
+            font=("Arial", 10),
+            bg="white",
+            relief=tk.FLAT
+        )
         self.file_info_text.pack(fill=tk.X)
         self.file_info_text.config(state=tk.DISABLED)
         
         # 拆分设置区域
-        settings_frame = ttk.LabelFrame(main_frame, text="拆分设置", padding="10 10 10 10")
+        settings_frame = tk.LabelFrame(
+            main_frame,
+            text="拆分设置",
+            bg="white",
+            font=("Arial", 10),
+            padx=10,
+            pady=10
+        )
         settings_frame.pack(fill=tk.X, pady=10)
         
         # 批处理大小设置
-        batch_frame = ttk.Frame(settings_frame)
+        batch_frame = tk.Frame(settings_frame, bg="white")
         batch_frame.pack(fill=tk.X, pady=5)
         
-        batch_label = ttk.Label(batch_frame, text="每块最大行数:")
-        batch_label.pack(side=tk.LEFT, padx=(0, 10))
+        batch_label = tk.Label(
+            batch_frame,
+            text="每块最大行数:",
+            bg="white",
+            anchor=tk.W,
+            width=15
+        )
+        batch_label.pack(side=tk.LEFT)
         
         self.batch_size = tk.IntVar(value=49998)
-        batch_entry = ttk.Entry(batch_frame, textvariable=self.batch_size, width=10)
-        batch_entry.pack(side=tk.LEFT)
-        create_tooltip(batch_entry, "建议Excel拆分不超过50000行/块")
+        batch_entry = tk.Entry(
+            batch_frame,
+            textvariable=self.batch_size,
+            width=15
+        )
+        batch_entry.pack(side=tk.LEFT, padx=10)
         
         # 并发进程数设置
-        workers_frame = ttk.Frame(settings_frame)
+        workers_frame = tk.Frame(settings_frame, bg="white")
         workers_frame.pack(fill=tk.X, pady=5)
         
-        workers_label = ttk.Label(workers_frame, text="并行处理进程数:")
-        workers_label.pack(side=tk.LEFT, padx=(0, 10))
+        workers_label = tk.Label(
+            workers_frame,
+            text="并行处理进程数:",
+            bg="white",
+            anchor=tk.W,
+            width=15
+        )
+        workers_label.pack(side=tk.LEFT)
         
         self.max_workers = tk.IntVar(value=4)
-        workers_spin = ttk.Spinbox(workers_frame, from_=1, to=16, textvariable=self.max_workers, width=5)
-        workers_spin.pack(side=tk.LEFT)
-        create_tooltip(workers_spin, "建议设置为CPU核心数或略低")
+        workers_spin = tk.Spinbox(
+            workers_frame,
+            from_=1,
+            to=16,
+            textvariable=self.max_workers,
+            width=5
+        )
+        workers_spin.pack(side=tk.LEFT, padx=10)
         
         # 清空旧输出选项
+        clear_frame = tk.Frame(settings_frame, bg="white")
+        clear_frame.pack(fill=tk.X, pady=5)
+        
         self.clear_old = tk.BooleanVar(value=True)
-        clear_check = ttk.Checkbutton(settings_frame, text="清空旧的输出文件", variable=self.clear_old)
-        clear_check.pack(anchor=tk.W, pady=5)
-        
-        # 添加一个明显的开始拆分按钮
-        start_btn_frame = ttk.Frame(main_frame)
-        start_btn_frame.pack(fill=tk.X, pady=10)
-        
-        # 使用大号字体和明显的按钮样式
-        self.split_btn = tk.Button(
-            start_btn_frame, 
-            text="开始拆分", 
-            command=self.start_split,
-            bg="#4CAF50",  # 绿色背景
-            fg="white",    # 白色文字
-            font=("Arial", 12, "bold"),
-            height=2,
-            relief=tk.RAISED,
-            borderwidth=3
+        clear_check = tk.Checkbutton(
+            clear_frame,
+            text="清空旧的输出文件",
+            variable=self.clear_old,
+            bg="white",
+            anchor=tk.W
         )
-        self.split_btn.pack(fill=tk.X, padx=50)
+        clear_check.pack(side=tk.LEFT)
         
-        # 拆分进度条区域
-        progress_frame = ttk.Frame(main_frame)
-        progress_frame.pack(fill=tk.X, pady=10)
+        # 添加开始拆分按钮
+        self.split_btn = tk.Button(
+            main_frame,
+            text="开始拆分",
+            command=self.start_split,
+            bg=SECONDARY_COLOR,
+            fg="white",
+            font=("Arial", 14, "bold"),
+            padx=20,
+            pady=10,
+            relief=tk.RAISED,
+            bd=1,
+            height=2
+        )
+        self.split_btn.pack(fill=tk.X, pady=15)
         
-        self.progress = ttk.Progressbar(progress_frame, orient=tk.HORIZONTAL, mode='indeterminate')
+        # 设置按钮的悬停效果
+        self.split_btn.bind("<Enter>", lambda e: self.split_btn.config(background="#388E3C"))
+        self.split_btn.bind("<Leave>", lambda e: self.split_btn.config(background=SECONDARY_COLOR))
+        
+        # 进度条区域
+        progress_frame = tk.Frame(main_frame, bg=BG_COLOR)
+        progress_frame.pack(fill=tk.X, pady=5)
+        
+        self.progress = ttk.Progressbar(
+            progress_frame,
+            orient=tk.HORIZONTAL,
+            mode='indeterminate'
+        )
         self.progress.pack(fill=tk.X)
         
         # 底部按钮区域
-        btn_frame = ttk.Frame(main_frame)
-        btn_frame.pack(fill=tk.X, pady=5)
+        button_frame = tk.Frame(main_frame, bg=BG_COLOR)
+        button_frame.pack(fill=tk.X, pady=10)
         
-        self.view_log_btn = ttk.Button(btn_frame, text="查看日志", command=self.view_log)
-        self.view_log_btn.pack(side=tk.LEFT, padx=5)
+        self.view_log_btn = tk.Button(
+            button_frame,
+            text="查看日志",
+            command=self.view_log,
+            bg=PRIMARY_COLOR,
+            fg="white",
+            padx=10,
+            relief=tk.FLAT
+        )
+        self.view_log_btn.pack(side=tk.LEFT)
         
-        exit_btn = ttk.Button(btn_frame, text="退出", command=self.root.destroy)
-        exit_btn.pack(side=tk.RIGHT, padx=5)
+        exit_btn = tk.Button(
+            button_frame,
+            text="退出",
+            command=self.root.destroy,
+            bg="#757575",
+            fg="white",
+            padx=10,
+            relief=tk.FLAT
+        )
+        exit_btn.pack(side=tk.RIGHT)
         
         # 状态栏
         self.status_var = tk.StringVar(value="准备就绪")
-        status_bar = ttk.Label(main_frame, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
-        status_bar.pack(side=tk.BOTTOM, fill=tk.X, pady=(10, 0))
+        status_bar = tk.Label(
+            self.root,
+            textvariable=self.status_var,
+            bd=1,
+            relief=tk.SUNKEN,
+            anchor=tk.W,
+            padx=5,
+            pady=2
+        )
+        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
         
+        # 如果支持拖放，更新状态栏信息
+        if TKDND_AVAILABLE:
+            self.status_var.set("准备就绪 - 支持文件拖放")
+    
     def browse_file(self):
         """打开文件选择对话框"""
         filetypes = [
@@ -257,12 +424,17 @@ class SplitApp:
     def run_split_task(self, filepath, batch_size, max_workers, clear_old):
         """在线程中执行拆分任务"""
         try:
-            split_file(filepath, batch_size, max_workers, clear_old)
+            # 调用拆分函数
+            result = split_file(filepath, batch_size, max_workers, clear_old)
             # 拆分成功
-            self.on_split_complete(True)
+            self.root.after(0, lambda: self.on_split_complete(True))
+        except UnicodeDecodeError as e:
+            # 特别处理编码错误
+            error_msg = f"文件编码错误: {str(e)}\n\n可能是文件包含无法识别的字符，请尝试以下解决方法:\n1. 使用记事本打开文件并另存为UTF-8格式\n2. 使用Excel打开并重新保存文件"
+            self.root.after(0, lambda: self.on_split_complete(False, error_msg))
         except Exception as e:
             # 拆分失败
-            self.on_split_complete(False, str(e))
+            self.root.after(0, lambda: self.on_split_complete(False, str(e)))
     
     def check_split_status(self):
         """检查拆分线程状态"""
@@ -298,7 +470,12 @@ class SplitApp:
 
 def main():
     """程序入口点"""
-    root = tk.Tk()
+    # 尝试使用TkinterDnD2
+    if TKDND_AVAILABLE:
+        root = TkinterDnD.Tk()
+    else:
+        root = tk.Tk()
+    
     app = SplitApp(root)
     root.mainloop()
 
